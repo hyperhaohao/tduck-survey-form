@@ -58,6 +58,7 @@ import java.util.concurrent.ConcurrentMap;
 @RequiredArgsConstructor
 @RequestMapping("/user/form/data")
 public class UserFormResultController {
+    private final com.tduck.cloud.api.demand.DemandSubmission demandSubmission;
     private final UserFormDataService formResultService;
     private final UserFormSettingService userFormSettingService;
     private final FormDataImportUtils formDataImportUtils;
@@ -134,13 +135,16 @@ public class UserFormResultController {
      * @param request 请求
      * @return
      */
+    @org.springframework.transaction.annotation.Transactional(rollbackFor = Exception.class)
     @PostMapping("/create")
     public Result createFormResult(@RequestBody UserFormDataEntity entity, HttpServletRequest request) {
         ValidatorUtils.validateEntity(entity);
         entity.setSubmitRequestIp(HttpUtils.getIpAddr(request));
         // 如果已经登陆了也记录用户信息 try catch 避免抛出异常
         entity.setCreateBy(SecurityUtils.getUserId() != null ? String.valueOf(SecurityUtils.getUserId()) : null);
+        demandSubmission.before(entity, (Long) request.getAttribute("userId"), true);
         Map<String, Object> result = formResultService.saveFormResult(entity);
+        demandSubmission.after(entity, result, (Long) request.getAttribute("userId"), true);
         return Result.success(result);
     }
 
@@ -151,6 +155,7 @@ public class UserFormResultController {
      * @param entity  填写数据
      * @param request 请求
      */
+    @org.springframework.transaction.annotation.Transactional(rollbackFor = Exception.class)
     @PostMapping("/public/create")
     @PermitAll
     public Result<Map<String, Object>> createPublicFormResult(@RequestBody UserFormDataEntity entity, HttpServletRequest request) {
@@ -172,7 +177,9 @@ public class UserFormResultController {
         } catch (Exception ignored) {
         }
 
+        demandSubmission.before(entity, (Long) request.getAttribute("userId"), false);
         Map<String, Object> result = formResultService.saveFormResult(entity);
+        demandSubmission.after(entity, result, (Long) request.getAttribute("userId"), false);
         ThreadUtil.execAsync(() -> {
             sendWriteResultNotify(entity.getFormKey());
         });

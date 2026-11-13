@@ -1,0 +1,13 @@
+ruima:
+  demand:
+    enabled: true
+    admin-ids: []
+  oidc:
+    enabled: true
+    issuer: ${OIDC_ISSUER:http://192.168.1.237:13004}
+    authorization-endpoint: ${OIDC_AUTHORIZATION_ENDPOINT:}
+    organization: ruima
+    client-id: ${OIDC_CLIENT_ID:}
+    client-secret: ${OIDC_CLIENT_SECRET:}
+    redirect-uri: ${OIDC_REDIRECT_URI:http://localhost:8999/auth/oidc/callback}
+    frontend-base: ${OIDC_FRONTEND_BASE:http://localhost:8888}

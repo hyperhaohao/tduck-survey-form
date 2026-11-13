@@ -40,6 +40,10 @@ public class WebMvcConfig implements WebMvcConfigurer {
     @Autowired
     private AuthorizationInterceptor authorizationInterceptor;
     @Autowired
+    private com.tduck.cloud.api.demand.DemandGuard demandGuard;
+    @Autowired
+    private com.tduck.cloud.api.demand.DemandRateLimit demandRateLimit;
+    @Autowired
     private NoRepeatSubmitInterceptor noRepeatSubmitInterceptor;
     @Autowired
     private LoginUserHandlerMethodArgumentResolver loginUserHandlerMethodArgumentResolver;
@@ -81,6 +85,8 @@ public class WebMvcConfig implements WebMvcConfigurer {
         //所有路径都被拦截
         registry.addInterceptor(noRepeatSubmitInterceptor).addPathPatterns("/**").excludePathPatterns(staticResources);
         registry.addInterceptor(authorizationInterceptor).addPathPatterns("/**").excludePathPatterns(staticResources);
+        registry.addInterceptor(demandGuard).addPathPatterns("/**").excludePathPatterns(staticResources);
+        registry.addInterceptor(demandRateLimit).addPathPatterns("/demand-api/**");
     }
 
     @Override

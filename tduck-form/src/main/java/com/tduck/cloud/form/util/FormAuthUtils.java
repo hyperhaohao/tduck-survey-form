@@ -23,6 +23,9 @@ public class FormAuthUtils {
      * 是否拥有表单的权限
      */
     public void hasPermission(String formKey) {
+        for (com.tduck.cloud.common.util.FormManagementExtension extension : SpringContextUtils.context().getBeansOfType(com.tduck.cloud.common.util.FormManagementExtension.class).values()) {
+            if (extension.canManage(SecurityUtils.getUserId(), formKey)) return;
+        }
         // 是否是超级管理员
         if (SecurityUtils.isAdmin(SecurityUtils.getUserId())) {
             return;

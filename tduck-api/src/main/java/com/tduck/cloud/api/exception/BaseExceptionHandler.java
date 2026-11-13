@@ -23,6 +23,13 @@ import org.springframework.web.servlet.NoHandlerFoundException;
 public class BaseExceptionHandler {
 
 
+    /** 业务拒绝保留 403/409/429 等响应码，不记录凭证及请求正文。 */
+    @ExceptionHandler(com.tduck.cloud.common.exception.BaseException.class)
+    public Result handleBusinessException(com.tduck.cloud.common.exception.BaseException e) {
+        log.warn("业务请求被拒绝，code={}", e.getCode());
+        return Result.failed(e.getCode(), e.getMsg());
+    }
+
     @ExceptionHandler(NoHandlerFoundException.class)
     public Result handlerNoFoundException(NoHandlerFoundException e) {
         log.error(e.getMessage(), e);

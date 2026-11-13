@@ -16,6 +16,7 @@ import lombok.Getter;
 public enum AccountChannelEnum {
 
 
+    OIDC(5, "统一登录"),
     WX_MP(1, "微信扫码"),
     EMAIL(2, "邮箱"),
     PHONE(3, "手机号"),

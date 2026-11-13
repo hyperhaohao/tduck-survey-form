@@ -35,3 +35,10 @@ build/ !**/src/main/**/build/
 # Static Resources
 /tduck-api/src/main/resources/static/
 
+
+# 本机运行配置、认证材料与测试交付包
+*.local.yml
+*.local.yaml
+.env
+.env.*.local
+*.log

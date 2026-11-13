@@ -24,6 +24,10 @@ import java.util.Map;
 @TableName(value = "fm_user_form_data", autoResultMap = true)
 public class UserFormDataEntity extends SysBaseEntity {
 
+    /** 需求模块匿名填报开关，由服务端校验。 */
+    @TableField(exist = false)
+    private Boolean demandAnonymous;
+
     /**
      * 表单key
      */

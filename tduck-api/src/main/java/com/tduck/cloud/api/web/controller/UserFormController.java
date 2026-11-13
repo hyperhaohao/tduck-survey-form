@@ -250,7 +250,9 @@ public class UserFormController {
     public Result updateForm(@RequestBody UserFormEntity form, @RequestAttribute Long userId) {
         ValidatorUtils.validateEntity(form, AddGroup.class);
         UserFormEntity oldForm = formService.getByKey(form.getFormKey());
-        if (ObjectUtil.isNotNull(oldForm) && userId.equals(oldForm.getUserId())) {
+        FormAuthUtils.hasPermission(form.getFormKey());
+        if (ObjectUtil.isNotNull(oldForm)) {
+            form.setUserId(oldForm.getUserId());
             form.setId(oldForm.getId());
             formService.updateById(form);
         }
