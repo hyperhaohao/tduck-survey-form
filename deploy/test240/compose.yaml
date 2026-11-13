@@ -1,0 +1,57 @@
+name: ruima-survey-test
+services:
+  db:
+    image: mysql@sha256:a532724022429812ec797c285c1b540a644c15e248579c6bfdf12a8fbaab4964
+    restart: unless-stopped
+    cpus: 0.75
+    mem_limit: 512m
+    environment:
+      MYSQL_DATABASE: ruima_survey
+      MYSQL_USER: survey
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/mysql-root-password
+      MYSQL_PASSWORD_FILE: /run/secrets/mysql-app-password
+      TZ: Asia/Shanghai
+    volumes:
+      - /data/appdata/ruima-survey-test/mysql:/var/lib/mysql
+      - ./init:/docker-entrypoint-initdb.d:ro
+      - ./secrets/mysql-root-password:/run/secrets/mysql-root-password:ro
+      - ./secrets/mysql-app-password:/run/secrets/mysql-app-password:ro
+      - ./secrets/mysql-root.cnf:/run/secrets/mysql-root.cnf:ro
+    command: ["--innodb-buffer-pool-size=128M","--max-connections=40","--character-set-server=utf8mb4","--collation-server=utf8mb4_unicode_ci"]
+    healthcheck:
+      test: ["CMD","mysqladmin","--defaults-extra-file=/run/secrets/mysql-root.cnf","ping","--silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+  app:
+    image: ruima/survey-test:20261113
+    build: {context: ./build}
+    restart: unless-stopped
+    cpus: 1.5
+    mem_limit: 1400m
+    environment:
+      JAVA_TOOL_OPTIONS: -Xms192m -Xmx768m -XX:MaxMetaspaceSize=256m -XX:+UseG1GC
+      SPRING_CONFIG_ADDITIONAL_LOCATION: file:/run/secrets/application-test.yml
+      TZ: Asia/Shanghai
+    ports: ["127.0.0.1:18001:8999"]
+    volumes:
+      - ./secrets:/run/secrets:ro
+      - /data/appdata/ruima-survey-test/upload:/application/upload
+      - /data/appdata/ruima-survey-test/logs:/application/logs
+    depends_on:
+      db: {condition: service_healthy}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          wget -q -O - http://127.0.0.1:8999/demand-api/capabilities | grep -q '"enabled":true'
+      interval: 20s
+      timeout: 8s
+      start_period: 90s
+      retries: 5
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}

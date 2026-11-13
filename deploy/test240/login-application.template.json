@@ -1,0 +1,20 @@
+{
+  "owner": "admin",
+  "name": "app-ruima-survey",
+  "displayName": "瑞玛需求征集",
+  "organization": "ruima",
+  "enableSignUp": false,
+  "enableGuestSignin": false,
+  "enablePassword": true,
+  "grantTypes": [
+    "authorization_code"
+  ],
+  "redirectUris": [
+    "http://192.168.1.240:18000/auth/oidc/callback"
+  ],
+  "homepageUrl": "http://192.168.1.240:18000",
+  "tokenFormat": "JWT",
+  "tokenSigningMethod": "RS256",
+  "expireInHours": 1,
+  "refreshExpireInHours": 0
+}
