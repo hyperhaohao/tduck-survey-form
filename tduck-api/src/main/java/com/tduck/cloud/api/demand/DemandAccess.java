@@ -58,10 +58,21 @@ public class DemandAccess {
                 userId)
             > 0;
   }
-  /** 判断能否查看总表。 */
-  public boolean table(String key, Long userId) {
-    return admin(userId) || handler(key, userId);
+  /** 单据管理员可管理本收集单的全部需求，全局管理员天然拥有该能力。 */
+  public boolean manage(String key, Long userId) {
+    return admin(userId)
+        || (userId != null
+            && store.count(
+                    "SELECT COUNT(*) FROM rm_demand_acl WHERE form_key=? AND user_id=? AND can_manage=TRUE",
+                    key,
+                    userId)
+                > 0);
   }
+  /** 是否可查看总表：经办人、单据管理员或全局管理员。 */
+  public boolean table(String key, Long userId) {
+    return admin(userId) || handler(key, userId) || manage(key, userId);
+  }
+
   /** 是否在填报名单中。 */
   public boolean visible(Map<String, Object> form, Long userId) {
     return userId != null
@@ -92,6 +103,19 @@ public class DemandAccess {
         || !handler(demand.get("formKey").toString(), userId))
       throw new BaseException("仅当前经办人可处理此需求", 403);
   }
+  /** 要求本收集单的单据管理员或全局管理员。 */
+  public void requireManage(String key, Long userId) {
+    requireEnabled();
+    if (!manage(key, userId)) throw new BaseException("仅该收集单的单据管理员可执行此操作", 403);
+  }
+  /** 当前经办人或单据管理员均可处理，管理员可代填结果与回复。 */
+  public void requireHandle(Map<String, Object> demand, Long userId) {
+    String key = demand.get("formKey").toString();
+    if (userId == null) throw new BaseException("仅当前经办人或单据管理员可处理此需求", 403);
+    if (manage(key, userId)) return;
+    requireAssigned(demand, userId);
+  }
+
   /** 获取可显示姓名，不返回完整用户实体。 */
   public String name(Long userId) {
     UserEntity user = userId == null ? null : users.getById(userId);
@@ -104,29 +128,43 @@ public class DemandAccess {
     if (!enabled() || userId == null) {
       m.put("admin", false);
       m.put("handler", false);
+      m.put("manage", false);
       return m;
     }
     m.put("admin", admin(userId));
     m.put(
         "handler",
         store.count(
-                "SELECT COUNT(*) FROM rm_demand_acl WHERE user_id=? AND can_handle=TRUE", userId)
+                "SELECT COUNT(*) FROM rm_demand_acl WHERE user_id=? AND (can_handle=TRUE OR can_manage=TRUE)",
+                userId)
             > 0);
+    m.put(
+        "manage",
+        admin(userId)
+            || store.count(
+                    "SELECT COUNT(*) FROM rm_demand_acl WHERE user_id=? AND can_manage=TRUE",
+                    userId)
+                > 0);
     m.put(
         "mineUnread",
         store.count(
             "SELECT COUNT(*) FROM rm_demand d LEFT JOIN rm_demand_read r ON r.object_type='DEMAND' AND r.object_id=d.id AND r.user_id=? WHERE d.submitter_id=? AND d.public_version>COALESCE(r.seen_version,1)",
             userId,
             userId));
+    StringBuilder pendingWhere =
+        new StringBuilder(" WHERE f.is_deleted=FALSE");
+    List<Object> pendingArgs = new ArrayList<>();
+    DemandScope.pending(pendingWhere, pendingArgs, userId);
     m.put(
         "pending",
         store.count(
-            "SELECT COUNT(*) FROM rm_demand d JOIN rm_demand_acl a ON a.form_key=d.form_key AND a.user_id=d.handler_id AND a.can_handle=TRUE WHERE d.handler_id=? AND d.decision<>'REJECTED' AND d.progress<>'COMPLETED'",
-            userId));
+            "SELECT COUNT(*) FROM rm_demand d JOIN fm_user_form f ON f.form_key=d.form_key"
+                + pendingWhere,
+            pendingArgs.toArray()));
     m.put(
         "publicationUnread",
         store.count(
-            "SELECT COUNT(*) FROM rm_demand_publication p JOIN rm_demand d ON d.id=p.demand_id JOIN rm_demand_form f ON f.form_key=d.form_key LEFT JOIN rm_demand_read r ON r.object_type='PUBLICATION' AND r.object_id=p.id AND r.user_id=? WHERE p.published=TRUE AND p.version>COALESCE(r.seen_version,0) AND (f.visibility='LOGIN' OR EXISTS(SELECT 1 FROM rm_demand_acl a WHERE a.form_key=f.form_key AND a.user_id=? AND (a.can_fill=TRUE OR a.can_handle=TRUE)) OR ?=TRUE)",
+            "SELECT COUNT(*) FROM rm_demand_publication p JOIN rm_demand d ON d.id=p.demand_id JOIN rm_demand_form f ON f.form_key=d.form_key LEFT JOIN rm_demand_read r ON r.object_type='PUBLICATION' AND r.object_id=p.id AND r.user_id=? WHERE p.published=TRUE AND p.version>COALESCE(r.seen_version,0) AND (f.visibility='LOGIN' OR EXISTS(SELECT 1 FROM rm_demand_acl a WHERE a.form_key=f.form_key AND a.user_id=? AND (a.can_fill=TRUE OR a.can_handle=TRUE OR a.can_manage=TRUE)) OR ?=TRUE)",
             userId,
             userId,
             admin(userId)));

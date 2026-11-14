@@ -7,6 +7,7 @@ import com.tduck.cloud.common.exception.BaseException;
 import com.tduck.cloud.common.util.Result;
 import com.tduck.cloud.storage.cloud.OssStorageFactory;
 import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
 import java.util.*;
 import javax.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
@@ -21,6 +22,7 @@ public class DemandController {
   private final DemandAccess access;
   private final DemandForms forms;
   private final DemandWorkflow workflow;
+  private final DemandExport export;
   /** 公开能力开关及登录后的菜单与角标。 */
   @NotLogin
   @GetMapping("/capabilities")
@@ -38,6 +40,11 @@ public class DemandController {
   @GetMapping("/forms/{key}")
   public Result<?> info(@PathVariable String key, HttpServletRequest r) {
     return Result.success(forms.info(key, user(r)));
+  }
+  /** 单据管理员读取可分派的经办人。 */
+  @GetMapping("/forms/{key}/handlers")
+  public Result<?> handlers(@PathVariable String key, HttpServletRequest r) {
+    return Result.success(forms.handlers(key, user(r)));
   }
   /** 后台全部原表单及需求配置。 */
   @GetMapping("/admin/forms")
@@ -92,17 +99,67 @@ public class DemandController {
       @RequestParam(defaultValue = "") String progress,
       @RequestParam(defaultValue = "") String formKey,
       @RequestParam(defaultValue = "") String handlerId,
+      @RequestParam(defaultValue = "") String submitStart,
+      @RequestParam(defaultValue = "") String submitEnd,
       @RequestParam(defaultValue = "1") int page,
       @RequestParam(defaultValue = "20") int size,
       HttpServletRequest r) {
     return Result.success(
-        workflow.list(user(r), scope, keyword, decision, progress, formKey, handlerId, page, size));
+        workflow.list(
+            user(r),
+            scope,
+            keyword,
+            decision,
+            progress,
+            formKey,
+            handlerId,
+            submitStart,
+            submitEnd,
+            page,
+            size));
   }
   /** 按收集单汇总当前范围的需求数量，供页面分组展示。 */
   @GetMapping("/requests/summary")
   public Result<?> summary(
       @RequestParam(defaultValue = "mine") String scope, HttpServletRequest r) {
     return Result.success(workflow.summary(user(r), scope));
+  }
+  /** 导出当前筛选条件下的需求，权限与列表一致。 */
+  @GetMapping("/export/requests")
+  public ResponseEntity<byte[]> exportRequests(
+      @RequestParam(defaultValue = "mine") String scope,
+      @RequestParam(defaultValue = "") String keyword,
+      @RequestParam(defaultValue = "") String decision,
+      @RequestParam(defaultValue = "") String progress,
+      @RequestParam(defaultValue = "") String formKey,
+      @RequestParam(defaultValue = "") String handlerId,
+      @RequestParam(defaultValue = "") String submitStart,
+      @RequestParam(defaultValue = "") String submitEnd,
+      HttpServletRequest r) {
+    DemandExport.ExportFile file =
+        export.requests(
+            user(r),
+            scope,
+            keyword,
+            decision,
+            progress,
+            formKey,
+            handlerId,
+            submitStart,
+            submitEnd);
+    String name = "pending".equals(scope) ? "待我处理" : "table".equals(scope) ? "需求总表" : "我的需求";
+    return xlsx(file, name);
+  }
+  /** 导出当前筛选条件下可见的公示。 */
+  @GetMapping("/export/publications")
+  public ResponseEntity<byte[]> exportPublications(
+      @RequestParam(defaultValue = "") String formKey,
+      @RequestParam(defaultValue = "") String keyword,
+      @RequestParam(defaultValue = "") String submitStart,
+      @RequestParam(defaultValue = "") String submitEnd,
+      HttpServletRequest r) {
+    return xlsx(
+        export.publications(user(r), formKey, keyword, submitStart, submitEnd), "需求公示");
   }
   /** 本人或经办人读取详情；匿名查询使用独立 POST 接口。 */
   @GetMapping("/requests/{id}")
@@ -159,12 +216,26 @@ public class DemandController {
         user(r));
     return Result.success();
   }
-  /** 管理员审核发布或撤回公示。 */
+  /** 单据管理员审核发布或撤回公示。 */
   @PostMapping("/requests/{id}/publication")
   public Result<?> publish(
       @PathVariable String id, @RequestBody Map<String, Object> body, HttpServletRequest r) {
     workflow.publish(id, body, user(r));
     return Result.success();
+  }
+  /** 自动生成内容并发布公示，已发布时幂等返回。 */
+  @PostMapping("/requests/{id}/publication/auto")
+  public Result<?> autoPublish(
+      @PathVariable String id, @RequestBody Map<String, Object> body, HttpServletRequest r) {
+    return Result.success(
+        workflow.autoPublish(id, number(body.get("revision")), user(r)));
+  }
+  /** 记录不公示并移出待办。 */
+  @PostMapping("/requests/{id}/publication/skip")
+  public Result<?> skipPublication(
+      @PathVariable String id, @RequestBody Map<String, Object> body, HttpServletRequest r) {
+    return Result.success(
+        workflow.skipPublication(id, number(body.get("revision")), user(r)));
   }
   /** 内部已审核公示列表。 */
   @GetMapping("/publications")
@@ -205,5 +276,21 @@ public class DemandController {
   /** 使用认证拦截器写入的身份，不采信客户端用户参数。 */
   private Long user(HttpServletRequest r) {
     return number(r.getAttribute("userId"));
+  }
+  /** 统一下载响应头，截断时由前端提示实际导出范围。 */
+  private ResponseEntity<byte[]> xlsx(DemandExport.ExportFile file, String name) {
+    String stamp = new SimpleDateFormat("yyyyMMdd-HHmm").format(new Date());
+    HttpHeaders headers = new HttpHeaders();
+    headers.setContentType(
+        MediaType.parseMediaType(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
+    headers.setContentDisposition(
+        ContentDisposition.attachment()
+            .filename(name + "-" + stamp + ".xlsx", StandardCharsets.UTF_8)
+            .build());
+    headers.setCacheControl("no-store");
+    headers.set("X-Content-Type-Options", "nosniff");
+    if (file.truncated) headers.set("X-Export-Truncated", "true");
+    return new ResponseEntity<>(file.bytes, headers, HttpStatus.OK);
   }
 }

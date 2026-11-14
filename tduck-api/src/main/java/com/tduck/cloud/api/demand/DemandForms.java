@@ -80,6 +80,7 @@ public class DemandForms {
           anonymous,
           flag(body.get("published")),
           endTime);
+      grantCreatorManager(key);
     } else {
       long revision = Long.parseLong(String.valueOf(body.getOrDefault("revision", -1)));
       if (revision != number(old.get("revision"))) throw new BaseException("配置已变化，请刷新后重试", 409);
@@ -91,29 +92,73 @@ public class DemandForms {
           flag(body.get("published")),
           endTime,
           key);
+      if (store.count(
+              "SELECT COUNT(*) FROM rm_demand_acl WHERE form_key=? AND can_manage=TRUE", key)
+          == 0) grantCreatorManager(key);
     }
+  }
+  /** 创建人默认成为单据管理员，已有权限行只补管理标记。 */
+  private void grantCreatorManager(String key) {
+    Map<String, Object> form =
+        store.one("SELECT user_id FROM fm_user_form WHERE form_key=? AND is_deleted=FALSE", key);
+    Long creator = form == null ? null : number(form.get("userId"));
+    if (creator == null
+        || store.count("SELECT COUNT(*) FROM ac_user WHERE id=? AND deleted=FALSE", creator) == 0)
+      return;
+    if (store.update(
+            "UPDATE rm_demand_acl SET can_manage=TRUE WHERE form_key=? AND user_id=?", key, creator)
+        == 0)
+      store.update(
+          "INSERT INTO rm_demand_acl(form_key,user_id,can_fill,can_handle,can_manage) VALUES(?,?,FALSE,FALSE,TRUE)",
+          key,
+          creator);
   }
   /** 查看具名权限。 */
   public List<Map<String, Object>> members(String key, Long userId) {
     access.requireAdmin(userId);
     return store.rows(
-        "SELECT a.user_id,u.name,a.can_fill,a.can_handle FROM rm_demand_acl a JOIN ac_user u ON u.id=a.user_id WHERE a.form_key=?",
+        "SELECT a.user_id,u.name,a.can_fill,a.can_handle,a.can_manage FROM rm_demand_acl a JOIN ac_user u ON u.id=a.user_id WHERE a.form_key=?",
         key);
   }
-  /** 分别授权填报与经办能力，撤权立即影响后续访问及待办。 */
+  /** 单据管理员读取可分派的经办人，不暴露完整成员名单。 */
+  public List<Map<String, Object>> handlers(String key, Long userId) {
+    if (userId == null) throw new BaseException("请先登录", 401);
+    access.requireManage(key, userId);
+    return store.rows(
+        "SELECT a.user_id,u.name FROM rm_demand_acl a JOIN ac_user u ON u.id=a.user_id WHERE a.form_key=? AND a.can_handle=TRUE AND u.deleted=FALSE ORDER BY u.name",
+        key);
+  }
+  /** 分别授权填报、经办与管理能力，撤权立即影响后续访问及待办。 */
   @Transactional
   public void member(String key, Long memberId, Map<String, Object> body, Long userId) {
     access.requireAdmin(userId);
-    if (access.form(key) == null) throw new BaseException("请先保存需求收集配置");
+    if (store.one("SELECT form_key FROM rm_demand_form WHERE form_key=? FOR UPDATE", key) == null)
+      throw new BaseException("请先保存需求收集配置");
     if (store.count("SELECT COUNT(*) FROM ac_user WHERE id=? AND deleted=FALSE", memberId) == 0)
       throw new BaseException("用户不存在或已停用");
+    Map<String, Object> old =
+        store.one(
+            "SELECT can_manage FROM rm_demand_acl WHERE form_key=? AND user_id=?", key, memberId);
+    boolean canManage =
+        body.containsKey("canManage")
+            ? flag(body.get("canManage"))
+            : old != null && flag(old.get("canManage"));
+    if (old != null
+        && flag(old.get("canManage"))
+        && !canManage
+        && store.count(
+                "SELECT COUNT(*) FROM rm_demand_acl WHERE form_key=? AND can_manage=TRUE AND user_id<>?",
+                key,
+                memberId)
+            == 0) throw new BaseException("每个收集单至少保留一名单据管理员");
     store.update("DELETE FROM rm_demand_acl WHERE form_key=? AND user_id=?", key, memberId);
     store.update(
-        "INSERT INTO rm_demand_acl(form_key,user_id,can_fill,can_handle) VALUES(?,?,?,?)",
+        "INSERT INTO rm_demand_acl(form_key,user_id,can_fill,can_handle,can_manage) VALUES(?,?,?,?,?)",
         key,
         memberId,
         flag(body.get("canFill")),
-        flag(body.get("canHandle")));
+        flag(body.get("canHandle")),
+        canManage);
   }
   /** 管理页面仅返回必要的账户标识和姓名。 */
   public List<Map<String, Object>> users(String keyword, Long userId) {

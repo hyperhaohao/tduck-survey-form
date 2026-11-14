@@ -13,6 +13,8 @@ import com.tduck.cloud.form.entity.UserFormDataEntity;
 import com.tduck.cloud.form.service.UserFormItemService;
 import java.util.*;
 import java.util.concurrent.*;
+import org.apache.poi.ss.usermodel.*;
+import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.*;
 import org.springframework.core.io.FileSystemResource;
@@ -30,6 +32,7 @@ class DemandWorkflowTest {
   DemandAccess access;
   DemandForms forms;
   DemandWorkflow workflow;
+  DemandExport export;
   DemandSubmission submission;
   DemandProperties properties;
   UserService users;
@@ -50,7 +53,7 @@ class DemandWorkflowTest {
         "CREATE TABLE fm_user_form(form_key VARCHAR(64) PRIMARY KEY,name VARCHAR(200),description VARCHAR(1000),status INT,is_deleted BOOLEAN DEFAULT FALSE,is_folder BOOLEAN DEFAULT FALSE,user_id BIGINT,create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
     jdbc.execute(
         "CREATE TABLE fm_user_form_data(id BIGINT PRIMARY KEY,form_key VARCHAR(64),original_data VARCHAR(10000))");
-    for (long id : new long[] {1, 10, 20, 30, 40})
+    for (long id : new long[] {1, 10, 20, 30, 40, 50})
       jdbc.update("INSERT INTO ac_user(id,name) VALUES(?,?)", id, "人员" + id);
     jdbc.update(
         "INSERT INTO fm_user_form(form_key,name,description,status,user_id) VALUES('A','需求征集','测试',2,1)");
@@ -58,6 +61,8 @@ class DemandWorkflowTest {
         "INSERT INTO rm_demand_form(form_key,visibility,allow_anonymous,published) VALUES('A','LOGIN',TRUE,TRUE)");
     jdbc.update(
         "INSERT INTO rm_demand_acl(form_key,user_id,can_fill,can_handle) VALUES('A',30,FALSE,TRUE),('A',40,FALSE,TRUE)");
+    jdbc.update(
+        "INSERT INTO rm_demand_acl(form_key,user_id,can_fill,can_handle,can_manage) VALUES('A',50,FALSE,FALSE,TRUE)");
     users = mock(UserService.class);
     when(users.getById(any()))
         .thenAnswer(
@@ -75,6 +80,7 @@ class DemandWorkflowTest {
     UserFormItemService fields = mock(UserFormItemService.class);
     when(fields.listFormFields(anyString())).thenReturn(Collections.emptyList());
     workflow = new DemandWorkflow(store, access, fields);
+    export = new DemandExport(workflow);
     submission = new DemandSubmission(store, access);
     tx = new TransactionTemplate(new DataSourceTransactionManager(ds));
   }
@@ -129,8 +135,225 @@ class DemandWorkflowTest {
         30L);
   }
 
+  private long revision(String id) {
+    return number(store.one("SELECT revision FROM rm_demand WHERE id=?", id).get("revision"));
+  }
+
+  private XSSFWorkbook book(DemandExport.ExportFile file) throws Exception {
+    return new XSSFWorkbook(new java.io.ByteArrayInputStream(file.bytes));
+  }
+
+  private String cell(Sheet sheet, int rowIndex, int column) {
+    Row row = sheet.getRow(rowIndex);
+    if (row == null) return "";
+    Cell cell = row.getCell(column);
+    return cell == null ? "" : cell.getStringCellValue();
+  }
+
+  private int rowCount(DemandExport.ExportFile file) throws Exception {
+    try (XSSFWorkbook workbook = book(file)) {
+      return workbook.getSheetAt(0).getLastRowNum();
+    }
+  }
+
+  @Test
+  void creatorDefaultsToManagerAndLastManagerIsProtected() {
+    jdbc.update(
+        "INSERT INTO fm_user_form(form_key,name,description,status,user_id) VALUES('B','设备改善','测试',2,20)");
+    forms.configure(
+        "B", body("visibility", "LOGIN", "allowAnonymous", false, "published", true), 1L);
+    assertTrue(access.manage("B", 20L));
+    List<Map<String, Object>> members = forms.members("B", 1L);
+    assertEquals(1, members.size());
+    assertTrue(flag(members.get(0).get("canManage")));
+    // 旧前端不传 canManage 时保留原有管理权限。
+    forms.member("B", 20L, body("canFill", true, "canHandle", true), 1L);
+    assertTrue(flag(forms.members("B", 1L).get(0).get("canManage")));
+    assertThrows(
+        BaseException.class,
+        () ->
+            forms.member(
+                "B", 20L, body("canFill", true, "canHandle", true, "canManage", false), 1L));
+    forms.member("B", 30L, body("canManage", true), 1L);
+    forms.member("B", 20L, body("canManage", false), 1L);
+    assertFalse(access.manage("B", 20L));
+    assertTrue(access.manage("B", 30L));
+  }
+
+  @Test
+  void managerPendingMatchesCapabilitiesAndSummary() {
+    String id = create(100, 10L, false);
+    assertEquals(
+        1L, workflow.list(50L, "pending", "", "", "", "", "", "", "", 1, 20).get("total"));
+    assertEquals(
+        0L, workflow.list(40L, "pending", "", "", "", "", "", "", "", 1, 20).get("total"));
+    assertEquals(1L, access.capabilities(50L).get("pending"));
+    List<Map<String, Object>> pending = workflow.summary(50L, "pending");
+    assertEquals(1, pending.size());
+    assertEquals(1L, ((Number) pending.get(0).get("pending")).longValue());
+    assertTrue(flag(pending.get(0).get("canManage")));
+    Map<String, Object> detail = workflow.detail(id, 50L, null);
+    assertEquals(true, detail.get("canManage"));
+    assertEquals(true, detail.get("canHandle"));
+    assertEquals(true, detail.get("canAssign"));
+    workflow.assign(id, 30L, revision(id), 50L);
+    workflow.outcome(
+        id,
+        body(
+            "revision",
+            revision(id),
+            "decision",
+            "ACCEPTED",
+            "progress",
+            "PLANNED",
+            "reason",
+            "采纳说明",
+            "completion",
+            ""),
+        50L);
+    workflow.reply(id, "REPLY", "正式回复", 50L);
+    workflow.publish(
+        id,
+        body("published", true, "version", 0, "title", "公示标题", "summary", "摘要", "content", "正文"),
+        50L);
+    assertEquals(0L, access.capabilities(50L).get("pending"));
+    assertEquals(
+        0L, workflow.list(50L, "pending", "", "", "", "", "", "", "", 1, 20).get("total"));
+    assertEquals(
+        1L, workflow.list(50L, "table", "", "", "", "", "", "", "", 1, 20).get("total"));
+    assertEquals(2, forms.handlers("A", 50L).size());
+    assertThrows(BaseException.class, () -> forms.members("A", 50L));
+    assertThrows(BaseException.class, () -> forms.handlers("A", 40L));
+  }
+
+  @Test
+  void skipPublicationIsIdempotentAndBlocksPublished() {
+    String id = create(100, 10L, false);
+    long revision = revision(id);
+    long publicVersion =
+        number(
+            store.one("SELECT public_version FROM rm_demand WHERE id=?", id).get("publicVersion"));
+    Map<String, Object> first = workflow.skipPublication(id, revision, 50L);
+    assertEquals(true, first.get("changed"));
+    Map<String, Object> row =
+        store.one("SELECT publication_skipped,revision,public_version FROM rm_demand WHERE id=?", id);
+    assertTrue(flag(row.get("publicationSkipped")));
+    assertEquals(revision + 1, number(row.get("revision")));
+    assertEquals(publicVersion, number(row.get("publicVersion")));
+    assertTrue(
+        store.count(
+                "SELECT COUNT(*) FROM rm_demand_message WHERE demand_id=? AND kind='AUDIT' AND content='选择不公示'",
+                id)
+            > 0);
+    Map<String, Object> second = workflow.skipPublication(id, revision, 50L);
+    assertEquals(false, second.get("changed"));
+    workflow.publish(
+        id,
+        body("published", true, "version", 0, "title", "公示标题", "summary", "摘要", "content", "正文"),
+        50L);
+    assertFalse(
+        flag(
+            store.one("SELECT publication_skipped FROM rm_demand WHERE id=?", id)
+                .get("publicationSkipped")));
+    assertThrows(BaseException.class, () -> workflow.skipPublication(id, revision(id), 50L));
+    workflow.publish(id, body("published", false, "version", 1), 50L);
+    assertEquals(
+        true, workflow.skipPublication(id, revision(id), 50L).get("changed"));
+  }
+
+  @Test
+  void autoPublishGeneratesContentAndIsIdempotent() {
+    String id = create(100, 10L, false);
+    assignTo(id, 30);
+    outcome(id, "ACCEPTED", "PLANNED", "采纳说明", "");
+    workflow.reply(id, "REPLY", "正式回复", 30L);
+    long revision = revision(id);
+    Map<String, Object> first = workflow.autoPublish(id, revision, 50L);
+    assertEquals(true, first.get("published"));
+    assertEquals(false, first.get("unchanged"));
+    Map<String, Object> publication =
+        store.one("SELECT * FROM rm_demand_publication WHERE demand_id=?", id);
+    assertEquals("改进建议100", publication.get("title"));
+    assertEquals("采纳说明", publication.get("summary"));
+    assertEquals("正式回复", publication.get("content"));
+    assertThrows(BaseException.class, () -> workflow.autoPublish(id, revision, 50L));
+    Map<String, Object> second = workflow.autoPublish(id, revision(id), 50L);
+    assertEquals(true, second.get("unchanged"));
+    assertEquals(
+        1L,
+        number(
+            store.one("SELECT version FROM rm_demand_publication WHERE demand_id=?", id)
+                .get("version")));
+    String empty = create(101, 10L, false);
+    assertThrows(BaseException.class, () -> workflow.autoPublish(empty, revision(empty), 50L));
+    String fallback = create(102, 10L, false);
+    assignTo(fallback, 30);
+    outcome(fallback, "DEFERRED", "NONE", "暂缓说明", "");
+    workflow.autoPublish(fallback, revision(fallback), 50L);
+    Map<String, Object> fallbackPublication =
+        store.one("SELECT summary,content FROM rm_demand_publication WHERE demand_id=?", fallback);
+    assertEquals("暂缓说明", fallbackPublication.get("summary"));
+    assertEquals("暂缓说明", fallbackPublication.get("content"));
+  }
+
+  @Test
+  void exportRespectsScopeAndTruncates() throws Exception {
+    String id = create(100, 10L, false);
+    assignTo(id, 30);
+    outcome(id, "ACCEPTED", "PLANNED", "采纳说明", "");
+    workflow.reply(id, "REPLY", "正式回复", 30L);
+    workflow.reply(id, "NOTE", "内部备注不可导出", 30L);
+    DemandExport.ExportFile file =
+        export.requests(30L, "table", "", "", "", "", "", "", "");
+    assertFalse(file.truncated);
+    try (XSSFWorkbook workbook = book(file)) {
+      Sheet sheet = workbook.getSheetAt(0);
+      assertEquals(1, sheet.getLastRowNum());
+      assertEquals("需求标题", cell(sheet, 0, 0));
+      assertEquals("需求征集", cell(sheet, 1, 2));
+      assertEquals("人员10", cell(sheet, 1, 3));
+      assertEquals("人员30", cell(sheet, 1, 4));
+      assertEquals("采纳", cell(sheet, 1, 5));
+      assertEquals("待实施", cell(sheet, 1, 6));
+      for (int i = 0; i <= sheet.getLastRowNum(); i++)
+        for (int j = 0; j < 9; j++) assertNotEquals("内部备注不可导出", cell(sheet, i, j));
+    }
+    assertEquals(1, rowCount(export.requests(10L, "mine", "", "", "", "", "", "", "")));
+    assertEquals(0, rowCount(export.requests(20L, "mine", "", "", "", "", "", "", "")));
+    assertEquals(1, rowCount(export.requests(30L, "pending", "", "", "", "", "", "", "")));
+    create(101, 10L, false);
+    Map<String, Object> limited =
+        workflow.exportRows(30L, "table", "", "", "", "", "", "", "", 1);
+    assertEquals(true, limited.get("truncated"));
+    assertEquals(1, ((List<?>) limited.get("rows")).size());
+  }
+
+  @Test
+  void exportPublicationsRespectsAudienceAndFilters() throws Exception {
+    String id = create(100, 10L, false);
+    workflow.publish(
+        id,
+        body(
+            "published", true, "version", 0, "title", "公开标题", "summary", "脱敏摘要", "content", "正式说明"),
+        1L);
+    DemandExport.ExportFile file = export.publications(20L, "", "", "", "");
+    try (XSSFWorkbook workbook = book(file)) {
+      Sheet sheet = workbook.getSheetAt(0);
+      assertEquals(1, sheet.getLastRowNum());
+      assertEquals("公开标题", cell(sheet, 1, 0));
+      assertEquals("脱敏摘要", cell(sheet, 1, 9));
+    }
+    assertEquals(0, rowCount(export.publications(20L, "B", "", "", "")));
+    assertEquals(0, rowCount(export.publications(20L, "", "不存在", "", "")));
+    assertEquals(0, rowCount(export.publications(20L, "", "", "2000-01-01", "2000-12-31")));
+    assertEquals(1, rowCount(export.publications(20L, "A", "公开", "2000-01-01", "2099-12-31")));
+    workflow.publish(id, body("published", false, "version", 1), 1L);
+    assertEquals(0, rowCount(export.publications(20L, "", "", "", "")));
+  }
+
   @Test
   void permissionUnionAndImmediateRevocation() {
+    assertEquals(false, access.capabilities(null).get("manage"));
     assertFalse(access.admin(30L));
     assertTrue(access.handler("A", 30L));
     assertTrue(access.visible(access.form("A"), 30L));
@@ -189,12 +412,24 @@ class DemandWorkflowTest {
     String id = create(100, 10L, false);
     assertThrows(BaseException.class, () -> workflow.detail(id, 20L, null));
     assertEquals(id, workflow.detail(id, 10L, null).get("id"));
-    assertEquals(0L, workflow.list(20L, "mine", "", "", "", "", "", 1, 20).get("total"));
-    assertEquals(1L, workflow.list(30L, "table", "", "", "", "", "", 1, 20).get("total"));
+    assertEquals(0L, workflow.list(20L, "mine", "", "", "", "", "", "", "", 1, 20).get("total"));
+    assertEquals(1L, workflow.list(30L, "table", "", "", "", "", "", "", "", 1, 20).get("total"));
     assertThrows(BaseException.class, () -> workflow.reply(id, "REPLY", "未分派回复", 30L));
     assignTo(id, 30);
     assertThrows(BaseException.class, () -> workflow.reply(id, "REPLY", "越权回复", 40L));
     workflow.reply(id, "REPLY", "正式回复", 30L);
+    List<Map<String, Object>> rows =
+        (List<Map<String, Object>>)
+            workflow.list(30L, "table", "", "", "", "", "", "", "", 1, 20).get("rows");
+    assertNotNull(rows.get(0).get("replyTime"));
+    assertEquals(
+        0L,
+        workflow.list(30L, "table", "", "", "", "", "", "2000-01-01", "2000-12-31", 1, 20)
+            .get("total"));
+    assertEquals(
+        1L,
+        workflow.list(30L, "table", "", "", "", "", "", "2000-01-01", "2099-12-31", 1, 20)
+            .get("total"));
     assertThrows(
         BaseException.class,
         () -> workflow.outcome(id, body("revision", 1, "decision", "REJECTED"), 1L));
@@ -308,6 +543,9 @@ class DemandWorkflowTest {
     Map<String, Object> publicRow = workflow.publications(20L).get(0);
     assertEquals("A", publicRow.get("formKey"));
     assertEquals("需求征集", publicRow.get("formName"));
+    assertEquals("人员10", publicRow.get("submitterName"));
+    assertEquals("人员30", publicRow.get("handlerName"));
+    assertNotNull(publicRow.get("createTime"));
     String publicationId = publicRow.get("id").toString();
     assertEquals(1L, access.capabilities(20L).get("publicationUnread"));
     outcome(id, "ACCEPTED", "COMPLETED", "实施完成", "私有完成记录");
@@ -462,7 +700,7 @@ class DemandWorkflowTest {
     when(sessions.verifyToken(anyString(), anyLong())).thenReturn(true);
     org.springframework.test.web.servlet.MockMvc mvc =
         org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
-                new DemandController(access, forms, workflow, store))
+                new DemandController(access, forms, workflow, export, store))
             .setControllerAdvice(new com.tduck.cloud.api.exception.BaseExceptionHandler())
             .addInterceptors(
                 new com.tduck.cloud.api.web.interceptor.AuthorizationInterceptor(jwt, sessions),
@@ -518,5 +756,49 @@ class DemandWorkflowTest {
         .andExpect(
             org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
                 .value(403));
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get(
+                    "/demand-api/forms/A/handlers")
+                .header("token", "qa50"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
+                .value(200));
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get(
+                    "/demand-api/forms/A/handlers")
+                .header("token", "qa30"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
+                .value(403));
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get(
+                    "/demand-api/export/requests")
+                .param("scope", "table")
+                .header("token", "qa30"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk())
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.header()
+                .string(
+                    "Content-Type",
+                    org.hamcrest.Matchers.containsString("spreadsheetml")));
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                    "/demand-api/requests/" + id + "/publication/skip")
+                .header("token", "qa30")
+                .contentType("application/json")
+                .content("{\"revision\":" + revision(id) + "}"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
+                .value(403));
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                    "/demand-api/requests/" + id + "/publication/skip")
+                .header("token", "qa50")
+                .contentType("application/json")
+                .content("{\"revision\":" + revision(id) + "}"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
+                .value(200));
   }
 }

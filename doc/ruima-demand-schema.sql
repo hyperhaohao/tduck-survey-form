@@ -6,7 +6,8 @@ CREATE TABLE IF NOT EXISTS rm_demand_form (
 );
 CREATE TABLE IF NOT EXISTS rm_demand_acl (
  form_key VARCHAR(64) NOT NULL, user_id BIGINT NOT NULL, can_fill BOOLEAN NOT NULL DEFAULT FALSE,
- can_handle BOOLEAN NOT NULL DEFAULT FALSE, PRIMARY KEY(form_key,user_id)
+ can_handle BOOLEAN NOT NULL DEFAULT FALSE, can_manage BOOLEAN NOT NULL DEFAULT FALSE,
+ PRIMARY KEY(form_key,user_id)
 );
 CREATE TABLE IF NOT EXISTS rm_demand_admin (user_id BIGINT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS rm_demand (
@@ -15,7 +16,8 @@ CREATE TABLE IF NOT EXISTS rm_demand (
  anonymous BOOLEAN NOT NULL, submitted_by BIGINT NULL, handler_id BIGINT NULL,
  decision VARCHAR(20) NOT NULL DEFAULT 'PENDING', progress VARCHAR(20) NOT NULL DEFAULT 'NONE',
  reason TEXT, completion TEXT, query_hash VARCHAR(64), revision INT NOT NULL DEFAULT 0,
- public_version BIGINT NOT NULL DEFAULT 1, create_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ public_version BIGINT NOT NULL DEFAULT 1, publication_skipped BOOLEAN NOT NULL DEFAULT FALSE,
+ create_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
  update_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX idx_rm_demand_submitter ON rm_demand(submitter_id,create_time);
