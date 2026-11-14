@@ -1,7 +1,7 @@
 {
   "owner": "admin",
   "name": "app-ruima-survey",
-  "displayName": "瑞玛需求征集",
+  "displayName": "瑞玛问卷系统",
   "organization": "ruima",
   "enableSignUp": false,
   "enableGuestSignin": false,
