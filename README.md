@@ -1,3 +1,20 @@
+# 瑞玛问卷系统后端
+
+本分支是“瑞玛问卷系统 / RUIMA Survey”的后端实现，已独立部署到240:18000测试。**其他Agent接手请先读取下方入口，不将历史上游介绍当作当前项目部署说明。** 状态基线日期：2026-11-14，接手时重新核验。
+
+## Agent接手说明
+
+- 通用入口：[AGENTS.md](AGENTS.md)；Claude入口：[CLAUDE.md](CLAUDE.md)。
+- 当前开发分支：`haoX/tduck-demand-loop`，origin为hyperhaohao用户Fork；[另一仓库开发分支](https://github.com/hyperhaohao/tduck-front/tree/haoX/tduck-demand-loop)。
+- 构建、测试、业务规则、品牌、Git协作及240部署边界均见AGENTS.md；本仓库可独立克隆使用。
+- 前后端分别提交、推送并验证远端；真实凭据、本地认证状态和构建产物不进入Git。
+- 下方保留原上游介绍及来源；许可证保持，产品界面和当前运行配置以瑞玛项目说明为准。
+
+## 阅读目录
+
+- [Agent接手说明](#agent接手说明)
+- [为什么选择 TDuck](#为什么选择-tduck)
+
 <p align="center">
     <img src="https://pro-oss.tduckcloud.com/6d4fa9c6ee554cd193161c4e658cb5e6.png" width="100" alt="TDuck Logo" />
 </p>
