@@ -201,6 +201,40 @@ class DemandWorkflowTest {
   }
 
   @Test
+  void summaryGroupsByFormAndKeepsScopeIsolation() {
+    String first = create(100, 10L, false);
+    String second = create(101, 10L, false);
+    jdbc.update(
+        "INSERT INTO fm_user_form(form_key,name,description,status,user_id) VALUES('B','设备改善','测试',2,1)");
+    jdbc.update(
+        "INSERT INTO rm_demand_form(form_key,visibility,allow_anonymous,published) VALUES('B','LOGIN',TRUE,TRUE)");
+    jdbc.update("UPDATE rm_demand SET form_key='B' WHERE id=?", second);
+    assignTo(first, 30);
+    List<Map<String, Object>> mine = workflow.summary(10L, "mine");
+    assertEquals(2, mine.size());
+    Map<String, Object> a = summaryRow(mine, "A");
+    Map<String, Object> b = summaryRow(mine, "B");
+    assertEquals("需求征集", a.get("formName"));
+    assertEquals(1L, ((Number) a.get("total")).longValue());
+    assertEquals(1L, ((Number) a.get("unread")).longValue());
+    assertEquals(1L, ((Number) a.get("pending")).longValue());
+    assertEquals("设备改善", b.get("formName"));
+    assertEquals(0L, ((Number) b.get("unread")).longValue());
+    assertTrue(workflow.summary(20L, "mine").isEmpty());
+    List<Map<String, Object>> pending = workflow.summary(30L, "pending");
+    assertEquals(1, pending.size());
+    assertEquals("A", pending.get(0).get("formKey"));
+    assertThrows(BaseException.class, () -> workflow.summary(10L, "unknown"));
+  }
+
+  private Map<String, Object> summaryRow(List<Map<String, Object>> rows, String formKey) {
+    return rows.stream()
+        .filter(r -> formKey.equals(r.get("formKey")))
+        .findFirst()
+        .orElseThrow(AssertionError::new);
+  }
+
+  @Test
   void fullLifecyclePreservesRepliesAndFiltersPrivateNotes() {
     String id = create(100, 10L, false);
     assignTo(id, 30);
@@ -272,11 +306,15 @@ class DemandWorkflowTest {
     assertThrows(BaseException.class, () -> workflow.publish(id, p, 30L));
     workflow.publish(id, p, 1L);
     Map<String, Object> publicRow = workflow.publications(20L).get(0);
+    assertEquals("A", publicRow.get("formKey"));
+    assertEquals("需求征集", publicRow.get("formName"));
     String publicationId = publicRow.get("id").toString();
     assertEquals(1L, access.capabilities(20L).get("publicationUnread"));
     outcome(id, "ACCEPTED", "COMPLETED", "实施完成", "私有完成记录");
     Map<String, Object> published = workflow.publication(publicationId, 20L);
     assertEquals("PLANNED", published.get("progress"));
+    assertEquals("需求征集", published.get("formName"));
+    assertFalse(published.containsKey("formKey"));
     assertFalse(published.containsKey("originalData"));
     assertFalse(published.containsKey("messages"));
     workflow.read("PUBLICATION", publicationId, 1, 20L);

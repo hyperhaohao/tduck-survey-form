@@ -32,21 +32,7 @@ public class DemandWorkflow {
     if (userId == null) throw new BaseException("请先登录", 401);
     List<Object> args = new ArrayList<>();
     StringBuilder where = new StringBuilder(" WHERE f.is_deleted=FALSE ");
-    if ("mine".equals(scope)) {
-      where.append(" AND d.submitter_id=?");
-      args.add(userId);
-    } else if ("pending".equals(scope)) {
-      where.append(
-          " AND d.handler_id=? AND d.decision<>'REJECTED' AND d.progress<>'COMPLETED' AND EXISTS(SELECT 1 FROM rm_demand_acl a WHERE a.form_key=d.form_key AND a.user_id=? AND a.can_handle=TRUE)");
-      args.add(userId);
-      args.add(userId);
-    } else if ("table".equals(scope)) {
-      if (!access.admin(userId)) {
-        where.append(
-            " AND EXISTS(SELECT 1 FROM rm_demand_acl a WHERE a.form_key=d.form_key AND a.user_id=? AND a.can_handle=TRUE)");
-        args.add(userId);
-      }
-    } else throw new BaseException("列表类型无效");
+    scopeWhere(scope, userId, where, args);
     if (keyword != null && !keyword.isEmpty()) {
       where.append(" AND (d.title LIKE ? OR d.request_no LIKE ? OR f.name LIKE ?)");
       for (int i = 0; i < 3; i++) args.add("%" + keyword + "%");
@@ -84,6 +70,45 @@ public class DemandWorkflow {
     result.put("rows", rows);
     result.put("total", total);
     return result;
+  }
+  /** 按收集单汇总当前范围的需求数量，供页面先选收集单再下钻。 */
+  public List<Map<String, Object>> summary(Long userId, String scope) {
+    access.requireEnabled();
+    if (userId == null) throw new BaseException("请先登录", 401);
+    List<Object> args = new ArrayList<>();
+    StringBuilder where = new StringBuilder(" WHERE f.is_deleted=FALSE ");
+    scopeWhere(scope, userId, where, args);
+    List<Object> rowArgs = new ArrayList<>();
+    rowArgs.add(userId);
+    rowArgs.addAll(args);
+    return store.rows(
+        "SELECT d.form_key,f.name AS form_name,COUNT(*) AS total,"
+            + "SUM(CASE WHEN d.public_version>COALESCE(r.seen_version,1) THEN 1 ELSE 0 END) AS unread,"
+            + "SUM(CASE WHEN d.decision<>'REJECTED' AND d.progress<>'COMPLETED' THEN 1 ELSE 0 END) AS pending,"
+            + "MAX(d.update_time) AS last_update"
+            + " FROM rm_demand d JOIN fm_user_form f ON f.form_key=d.form_key"
+            + " LEFT JOIN rm_demand_read r ON r.object_type='DEMAND' AND r.object_id=d.id AND r.user_id=?"
+            + where
+            + " GROUP BY d.form_key,f.name ORDER BY last_update DESC,d.form_key",
+        rowArgs.toArray());
+  }
+  /** 按本人、待办或获授权总表限定范围；列表与收集单汇总共用同一口径。 */
+  private void scopeWhere(String scope, Long userId, StringBuilder where, List<Object> args) {
+    if ("mine".equals(scope)) {
+      where.append(" AND d.submitter_id=?");
+      args.add(userId);
+    } else if ("pending".equals(scope)) {
+      where.append(
+          " AND d.handler_id=? AND d.decision<>'REJECTED' AND d.progress<>'COMPLETED' AND EXISTS(SELECT 1 FROM rm_demand_acl a WHERE a.form_key=d.form_key AND a.user_id=? AND a.can_handle=TRUE)");
+      args.add(userId);
+      args.add(userId);
+    } else if ("table".equals(scope)) {
+      if (!access.admin(userId)) {
+        where.append(
+            " AND EXISTS(SELECT 1 FROM rm_demand_acl a WHERE a.form_key=d.form_key AND a.user_id=? AND a.can_handle=TRUE)");
+        args.add(userId);
+      }
+    } else throw new BaseException("列表类型无效");
   }
   /** 读取需求，查询码、本人身份及总表权限严格隔离。 */
   public Map<String, Object> demand(String demandId, Long userId, String queryCode, boolean lock) {
@@ -258,7 +283,7 @@ public class DemandWorkflow {
     access.requireEnabled();
     if (userId == null) throw new BaseException("请先登录", 401);
     return store.rows(
-        "SELECT p.id,p.title,p.summary,p.decision,p.progress,p.version,p.update_time,CASE WHEN p.version>COALESCE(r.seen_version,0) THEN TRUE ELSE FALSE END AS unread FROM rm_demand_publication p JOIN rm_demand d ON d.id=p.demand_id JOIN rm_demand_form f ON f.form_key=d.form_key LEFT JOIN rm_demand_read r ON r.object_type='PUBLICATION' AND r.object_id=p.id AND r.user_id=? WHERE p.published=TRUE AND (f.visibility='LOGIN' OR EXISTS(SELECT 1 FROM rm_demand_acl a WHERE a.form_key=f.form_key AND a.user_id=? AND (a.can_fill=TRUE OR a.can_handle=TRUE)) OR ?=TRUE) ORDER BY p.update_time DESC",
+        "SELECT p.id,p.title,p.summary,p.decision,p.progress,p.version,p.update_time,d.form_key,u.name AS form_name,CASE WHEN p.version>COALESCE(r.seen_version,0) THEN TRUE ELSE FALSE END AS unread FROM rm_demand_publication p JOIN rm_demand d ON d.id=p.demand_id JOIN rm_demand_form f ON f.form_key=d.form_key JOIN fm_user_form u ON u.form_key=d.form_key LEFT JOIN rm_demand_read r ON r.object_type='PUBLICATION' AND r.object_id=p.id AND r.user_id=? WHERE p.published=TRUE AND (f.visibility='LOGIN' OR EXISTS(SELECT 1 FROM rm_demand_acl a WHERE a.form_key=f.form_key AND a.user_id=? AND (a.can_fill=TRUE OR a.can_handle=TRUE)) OR ?=TRUE) ORDER BY p.update_time DESC",
         userId,
         userId,
         access.admin(userId));
@@ -268,7 +293,7 @@ public class DemandWorkflow {
     if (userId == null) throw new BaseException("请先登录", 401);
     Map<String, Object> p =
         store.one(
-            "SELECT p.id,p.title,p.summary,p.content,p.decision,p.progress,p.version,p.update_time,d.form_key FROM rm_demand_publication p JOIN rm_demand d ON d.id=p.demand_id WHERE p.id=? AND p.published=TRUE",
+            "SELECT p.id,p.title,p.summary,p.content,p.decision,p.progress,p.version,p.update_time,d.form_key,u.name AS form_name FROM rm_demand_publication p JOIN rm_demand d ON d.id=p.demand_id JOIN fm_user_form u ON u.form_key=d.form_key WHERE p.id=? AND p.published=TRUE",
             id);
     if (p == null) throw new BaseException("公示不存在或已撤回", 403);
     Map<String, Object> form = access.form(p.get("formKey").toString());

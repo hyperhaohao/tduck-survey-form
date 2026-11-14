@@ -98,6 +98,12 @@ public class DemandController {
     return Result.success(
         workflow.list(user(r), scope, keyword, decision, progress, formKey, handlerId, page, size));
   }
+  /** 按收集单汇总当前范围的需求数量，供页面分组展示。 */
+  @GetMapping("/requests/summary")
+  public Result<?> summary(
+      @RequestParam(defaultValue = "mine") String scope, HttpServletRequest r) {
+    return Result.success(workflow.summary(user(r), scope));
+  }
   /** 本人或经办人读取详情；匿名查询使用独立 POST 接口。 */
   @GetMapping("/requests/{id}")
   public Result<?> detail(@PathVariable String id, HttpServletRequest r) {
