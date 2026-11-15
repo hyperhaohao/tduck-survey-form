@@ -72,3 +72,47 @@ sudo nginx -t
 - 首次全量部署因冒烟断言使用布尔身份比较、未接受数据库返回的非布尔真值而自动回滚；随后复用已构建镜像和已上传静态资源完成部署，未重复迁移，也未重复传输 159MB 包。
 - 回退材料：`backups/manager-20261114-pre/` 保留迁移前数据库转储（SHA256 `5f6b4dcb1db457b9fb57e55e57de9038cb91ed88523984797085b5bad4648b3c`）、原 JAR（`d122a9df…`）、静态目录和原镜像 ID（`79028f9c…`）；旧镜像标记为 `ruima/survey-test:rollback-20261114-manager`。回退时先恢复前端，再切回旧镜像；数据库新增列保留，不做破坏性删除。
 - 本次未推送 GitHub；对应本地提交为后端 `293de7d`、前端 `7f179a2`。
+
+## 八、2026-11-14 后台管理员分级上线
+
+- 本次无数据库变更，未执行迁移；仅重建 `ruima-survey-test-app-1`，数据库、Nginx 配置及其它容器未改动，其他容器保持运行。
+- 构建校验：后端 JAR SHA256 `f617f75cad89170c7dbe5c962555562ecfb70afb705ea9e50b0e723a0ea64b4c`；前端 150 个静态文件，`index.html` SHA256 `c33049de6d74a553ad8a05e9bdd3851471f949360d5ab78b9a228c513325e9fb`；应用镜像 `sha256:b6bf2581c2e19a6b398a0deccea16ee2a2a9b9379d545221c490dc73fd9c1059`，部署前镜像 `sha256:aa5f141d24fae6d180bd4cbb500ccbb9b7d0dedd4d89630354062cec6a9339b2`。
+- 验证结果：维护账户 `capabilities` 的 `admin/global/manage` 均为 true；后台收集单列表正常；`scope=managed` 导出返回 xlsx；合成需求验证“未回复时自动公示返回 409、正式回复后可发布”，跳过/自动公示及公示导出通过；`/`、`/demand/mine`、`/demand/pending`、`/demand/publications`、`/demand/admin`、`/project/my`、`/login/entry` 均 HTTP 200。真实浏览器 4 项（首页、后台、我的项目、设计器）通过，页面运行错误与失败请求均为 0；受限管理员路径由后端隔离测试与前端合成角色回归覆盖。合成需求、公示、消息与原始数据按 ID 清理，剩余 0 行。
+- 回退材料：`backups/admin-scope-20261114-pre/` 保留数据库转储、原 JAR、静态目录和原镜像 ID；旧镜像标记为 `ruima/survey-test:rollback-20261114-admin-scope`。回退时先恢复静态目录，再切回旧镜像；本次无数据库变更。
+- 部署来源为本地未提交工作区（后端 HEAD `72ec30f`、前端 HEAD `a974195`，各有 13 个修改文件）；尚未推送 GitHub。
+
+## 九、2026-11-15 AI 建表与设计器协作上线
+
+配置、接口、权限与排障见 [AI 建表与协作说明](../../doc/AI建表与协作说明.md)；本节只记录部署与验证。
+
+- 本次无数据库结构变更，不执行迁移；`deepSeekEnvConfig` 由管理员在后台保存时自动创建。部署前镜像 `sha256:b6bf2581c2e19a6b398a0deccea16ee2a2a9b9379d545221c490dc73fd9c1059`，部署后镜像 `sha256:8c59736095ae1f4b7a3a7719a408fa69c1cfab0f0fecf8fe62b5639e2d05305e`；应用健康，其他容器保持运行。
+- 构建校验：后端 JAR SHA256 `2dd1b0f5fccb4773d0df2908e800c95bc08f1be53080009546d340d8d3a07b83`；前端 150 个静态文件，`index.html` SHA256 `8e72e3160e117a148ae444d741febe4bd9b2dc5da71cef1739db28eda3133805`（部署前 `c33049de6d74a553ad8a05e9bdd3851471f949360d5ab78b9a228c513325e9fb`）；先更新资源后更新入口，逐文件 SHA256 校验通过。
+- Nginx：在 `/www/server/panel/vhost/nginx/ruima-survey-test.conf` 通用正则之前插入 `location ^~ /ai/`，关闭 `proxy_buffering`/`proxy_cache`/`gzip`，`proxy_http_version 1.1`、`Connection ""`、读写超时 600 秒；`nginx -t` 与 reload 通过。仓库模板 `backend/deploy/test240/nginx.conf` 已同步。
+- 配置前验证：维护账户 `/ai/status` 返回 `configured=false` 及明确中文原因；`POST /ai/gen-form-chat/stream` 返回 `text/event-stream` 和 `AI_NOT_CONFIGURED` 错误事件，不再出现 `AiChatUtils` NPE；未登录访问 `/ai/test-gen-form` 返回 401；`/`、`/demand/mine`、`/demand/pending`、`/demand/publications`、`/demand/admin`、`/project/my`、`/login/entry` 均 HTTP 200。
+- 真实浏览器（1024×768）：`/project/my` 的 AI 抽屉显示「AI 服务不可用」和「AI 服务未配置」、发送禁用、无横向溢出；设计器 `?ai=1` 自动打开 AI 协作抽屉并显示同一提示；`/manage/system?tab=deepSeekEnvConfig` 打开 AI 配置，默认普通模型 `deepseek-v4-flash`、深入思考模型 `deepseek-v4-pro`。页面运行错误与失败请求均为 0。
+- 回退材料：`backups/ai-20261115-pre/` 保留部署前 JAR、静态目录、镜像 ID、`index.html` 哈希和 Nginx 配置（root 0600）；旧镜像标记为 `ruima/survey-test:rollback-20261115-ai`。回退时先恢复 Nginx 和静态目录，再切回旧镜像；本次无数据库变更。
+- 未创建合成业务数据；AI 未配置探测未调用上游模型。真实生成、深入思考与设计器修正需管理员在「系统配置 → AI 配置」填写 Key 后联调。尚未推送 GitHub。
+
+## 十、2026-11-15 方案模式与设计器右侧平铺
+
+方案模式流程、配图、已知限制与设计取舍见 [AI 建表与协作说明](../../doc/AI建表与协作说明.md)。
+
+- 本次无数据库变更；应用重建一次（方案模式阶段接口与提示词），随后仅做前端静态资源最小替换（响应式修复），未重启应用、未改 Nginx。`/ai/` location 沿用第九节配置。
+- 应用镜像：部署前 `sha256:8c59736095ae1f4b7a3a7719a408fa69c1cfab0f0fecf8fe62b5639e2d05305e`，部署后 `sha256:023c3c601808a14d0be8e58e8723ca228b60ec24dc1f1ca53b9413279ace9b08`。
+- 构建校验：JAR SHA256 `b3c132ce2a4b76bd1fd4d03577f6599db9482db836835ad7e784dc17691bbbb0`；前端 150 个静态文件，首次 `index.html` SHA256 `d8fa69dbcf02446c82638fe400af160ea0a4c4d4b973a8f02abb1e5f3e013972`，随后响应式修复替换为 `9d54ac2378a7de164ddd851c033df5ea39c002ae9f1bb433f46d51a86ef3003a`；逐文件哈希校验通过。
+- 配置前验证：7 个页面均 HTTP 200；`/ai/status` 仍返回 `configured=false` 和明确原因；流式接口仍返回 `AI_NOT_CONFIGURED` 事件；未登录旧接口 401；其他容器保持运行。
+- 1024×768 真实浏览器：建表页方案模式/快速生成切换、方案记录空态、未配置横幅与发送禁用；设计器 AI 面板右侧平铺，无遮罩，默认 340px、画布 594px，拖拽后 383px，页面无横向溢出；配置页默认 `deepseek-v4-flash`/`deepseek-v4-pro`；页面运行错误与失败请求为 0。
+- 回退材料：`backups/ai-workflow-20261115-pre/` 保留方案模式上线前的 JAR、静态目录、镜像 ID、`index.html` 哈希和 Nginx 配置；`backups/ai-static-20261115-pre/` 保留静态替换前的完整静态目录。旧镜像标记为 `ruima/survey-test:rollback-20261115-ai-workflow`。回退时先恢复静态目录，再切回旧镜像；本次无数据库变更。
+- 未创建合成业务数据；真实 Key 下的澄清、方案、生成、深入思考与设计器应用联调待管理员填写 Key 后进行。尚未推送 GitHub。
+
+## 十一、2026-11-15 最高管理员绑定 Casdoor 账号
+
+- 员工入口只保留统一登录；原系统超级管理员是本地 `ac_user.id=1`，原先只能由旧账号密码登录。本次将 Casdoor 组织 `ruima` 的 `ruima-admin`（Casdoor 用户 id `f3ce4605-714e-42af-9038-bdc825052550`）显式绑定到本地 `ac_user.id=1`，使其经统一登录后即拥有系统配置、用户管理、模板和全部收集单权限。
+- 变更仅一条映射：`rm_demand_identity` 新增 `identity_hash=SHA-256(issuer + "\n" + subject)`、issuer `http://192.168.1.237:13004`、subject 为该 Casdoor 用户 id、`user_id=1`。未改代码，未重建镜像，未重启容器，未改 Nginx。
+- 备份：`backups/identity-20261115-pre/identity-and-user.sql`（root 0600，SHA256 `c8d11e317befc463c5c5feafad87e9b488081a76f31605cccba1937acd8b3d62`），保留 `rm_demand_identity` 与 `ac_user` 两表。
+- 验证：预检 `rm_demand_identity` 无 `user_id=1`、无目标哈希；插入影响 1 行；复核 `user_id=1` 恰 1 行，其余两条身份映射不变。真实 Casdoor 登录后的管理员能力待用户登录核验。
+- 回退：`DELETE FROM rm_demand_identity WHERE identity_hash='fda2520e48cf1c99d453630cb15ef2e5cdc9a6773c0851a79e7a18a0825b7efd';`；必要时用上述备份还原两张表。回退无需重启应用。
+- 未关闭旧账号密码登录，本地 `admin@tduckcloud.com` 保留为应急维护通道，凭据仅在服务器受限 secrets 目录。尚未推送 GitHub。
+- 真实 Key 联调（2026-11-15 23:40）：管理员配置的内网 New API 网关 Base URL 原为 `http://192.168.1.236:3000//v1`（多一个斜杠），网关返回 HTML，测试连接解析失败、流式请求超时；保留 Key 不变，仅把 Base URL 规范为 `/v1` 并保存即时生效。测试连接 453ms 成功；创建流程澄清无需提问、方案 5 题、生成 5 题；设计器合成表单方案 3 题、确认生成并应用成功，最终题目为多选“您常用的沟通方式”、多行文本“您对远程办公的建议”、数字“每周远程办公天数”，未改动的多行文本保留原 `formItemId`；合成表单与题目按 ID 清理，剩余 0 行。
+- 网关当前只提供 `deepseek-flash`、`deepseek-v4-flash` 等模型，没有独立 Pro/Reasoner；深入思考开关使用配置的 `reasoningModelName`，当前与普通模型相同，不会切换到更强模型；网关返回的 `reasoning_content` 仍会在面板展示。若需更强推理，请在网关新增模型后修改 AI 配置。
+- 方案卡出现时自动滚动到卡片顶部，保证「确认并生成」可见；该滚动修复已静态替换，最终 `index.html` SHA256 `4fd3cbca60190cb1d75ba7911e4669524cd572dd658601599a1ef8c63835beb0`，备份 `backups/ai-static-scroll-20261115-pre/`，未重启应用、未改 Nginx。尚未推送 GitHub。
