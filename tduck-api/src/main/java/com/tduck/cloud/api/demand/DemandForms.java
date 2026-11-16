@@ -116,9 +116,20 @@ public class DemandForms {
   /** 查看具名权限。 */
   public List<Map<String, Object>> members(String key, Long userId) {
     access.requireAdmin(userId);
-    return store.rows(
-        "SELECT a.user_id,u.name,a.can_fill,a.can_handle,a.can_manage FROM rm_demand_acl a JOIN ac_user u ON u.id=a.user_id WHERE a.form_key=?",
-        key);
+    List<Map<String, Object>> rows =
+        store.rows(
+            "SELECT a.user_id,u.name,a.can_fill,a.can_handle,a.can_manage FROM rm_demand_acl a JOIN ac_user u ON u.id=a.user_id WHERE a.form_key=?",
+            key);
+    normalizeMemberFlags(rows);
+    return rows;
+  }
+  /** 数据源关闭 tinyInt1isBit 时布尔列返回 0/1，接口统一输出布尔值。 */
+  static void normalizeMemberFlags(List<Map<String, Object>> rows) {
+    for (Map<String, Object> row : rows) {
+      row.put("canFill", flag(row.get("canFill")));
+      row.put("canHandle", flag(row.get("canHandle")));
+      row.put("canManage", flag(row.get("canManage")));
+    }
   }
   /** 单据管理员读取可分派的经办人，不暴露完整成员名单。 */
   public List<Map<String, Object>> handlers(String key, Long userId) {

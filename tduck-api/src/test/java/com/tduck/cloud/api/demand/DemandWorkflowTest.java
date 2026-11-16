@@ -181,6 +181,25 @@ class DemandWorkflowTest {
   }
 
   @Test
+  void memberFlagsReturnBooleansForNumericJdbcValues() {
+    Map<String, Object> numeric = new LinkedHashMap<>();
+    numeric.put("canFill", 1);
+    numeric.put("canHandle", 0);
+    numeric.put("canManage", 1);
+    Map<String, Object> bool = new LinkedHashMap<>();
+    bool.put("canFill", Boolean.TRUE);
+    bool.put("canHandle", Boolean.FALSE);
+    bool.put("canManage", Boolean.TRUE);
+    List<Map<String, Object>> rows = new ArrayList<>(Arrays.asList(numeric, bool));
+    DemandForms.normalizeMemberFlags(rows);
+    for (Map<String, Object> row : rows) {
+      assertEquals(Boolean.TRUE, row.get("canFill"));
+      assertEquals(Boolean.FALSE, row.get("canHandle"));
+      assertEquals(Boolean.TRUE, row.get("canManage"));
+    }
+  }
+
+  @Test
   void managerPendingMatchesCapabilitiesAndSummary() {
     String id = create(100, 10L, false);
     assertEquals(
