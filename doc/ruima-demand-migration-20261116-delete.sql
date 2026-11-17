@@ -1,0 +1,6 @@
+-- 2026-11-16 收集单作废/删除审计：已有实例执行一次；新实例由 ruima-demand-schema.sql 直接创建。
+-- MySQL 不支持 ADD COLUMN IF NOT EXISTS，执行前先确认列不存在。
+ALTER TABLE rm_demand_form ADD COLUMN voided_by BIGINT NULL;
+ALTER TABLE rm_demand_form ADD COLUMN voided_at TIMESTAMP NULL;
+ALTER TABLE rm_demand_form ADD COLUMN deleted_by BIGINT NULL;
+ALTER TABLE rm_demand_form ADD COLUMN deleted_at TIMESTAMP NULL;

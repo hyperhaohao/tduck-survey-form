@@ -23,6 +23,7 @@ public class DemandController {
   private final DemandForms forms;
   private final DemandWorkflow workflow;
   private final DemandExport export;
+  private final DemandDepartments departmentService;
   /** 公开能力开关及登录后的菜单与角标。 */
   @NotLogin
   @GetMapping("/capabilities")
@@ -58,6 +59,34 @@ public class DemandController {
     forms.configure(key, body, user(r));
     return Result.success();
   }
+  /** 作废或恢复收集单；作废后停止新填报，需求历史保留。 */
+  @PostMapping("/admin/forms/{key}/void")
+  public Result<?> setVoided(
+      @PathVariable String key, @RequestBody Map<String, Object> body, HttpServletRequest r) {
+    forms.setVoided(key, flag(body.get("voided")), user(r));
+    return Result.success();
+  }
+  /** 全局回收站：已逻辑删除的收集单。 */
+  @GetMapping("/admin/forms/deleted")
+  public Result<?> deletedForms(HttpServletRequest r) {
+    return Result.success(forms.deletedForms(user(r)));
+  }
+  /** 逻辑删除收集单到全局回收站。 */
+  @PostMapping("/admin/forms/{key}/delete")
+  public Result<?> deleteCollection(@PathVariable String key, HttpServletRequest r) {
+    return Result.success(forms.deleteCollection(key, user(r)));
+  }
+  /** 从全局回收站恢复收集单。 */
+  @PostMapping("/admin/forms/{key}/restore")
+  public Result<?> restoreCollection(@PathVariable String key, HttpServletRequest r) {
+    forms.restoreCollection(key, user(r));
+    return Result.success();
+  }
+  /** 彻底删除无需求、无答卷的收集单。 */
+  @PostMapping("/admin/forms/{key}/purge")
+  public Result<?> purgeCollection(@PathVariable String key, HttpServletRequest r) {
+    return Result.success(forms.purgeCollection(key, user(r)));
+  }
   /** 查询具名成员授权。 */
   @GetMapping("/admin/forms/{key}/members")
   public Result<?> members(@PathVariable String key, HttpServletRequest r) {
@@ -72,6 +101,39 @@ public class DemandController {
       HttpServletRequest r) {
     forms.member(key, memberId, body, user(r));
     return Result.success();
+  }
+  /** 可授权部门列表。 */
+  @GetMapping("/admin/departments")
+  public Result<?> departments(HttpServletRequest r) {
+    return Result.success(departmentService.list(user(r)));
+  }
+  /** 收集单部门授权。 */
+  @GetMapping("/admin/forms/{key}/department-members")
+  public Result<?> departmentMembers(@PathVariable String key, HttpServletRequest r) {
+    return Result.success(departmentService.members(key, user(r)));
+  }
+  /** 保存部门授权。 */
+  @PostMapping("/admin/forms/{key}/department-members/{deptKey}")
+  public Result<?> departmentMember(
+      @PathVariable String key,
+      @PathVariable String deptKey,
+      @RequestBody Map<String, Object> body,
+      HttpServletRequest r) {
+    departmentService.save(key, deptKey, body, user(r));
+    return Result.success();
+  }
+  /** 移除部门授权。 */
+  @DeleteMapping("/admin/forms/{key}/department-members/{deptKey}")
+  public Result<?> removeDepartmentMember(
+      @PathVariable String key, @PathVariable String deptKey, HttpServletRequest r) {
+    departmentService.remove(key, deptKey, user(r));
+    return Result.success();
+  }
+  /** 全局管理员导入部门树与成员关系。 */
+  @PostMapping("/admin/departments/import")
+  public Result<?> importDepartments(
+      @RequestBody Map<String, Object> body, HttpServletRequest r) {
+    return Result.success(departmentService.importTree(body, user(r)));
   }
   /** 搜索授权候选用户。 */
   @GetMapping("/admin/users")
@@ -147,7 +209,10 @@ public class DemandController {
             handlerId,
             submitStart,
             submitEnd);
-    String name = "pending".equals(scope) ? "待我处理" : "table".equals(scope) ? "需求总表" : "我的需求";
+    String name =
+        "pending".equals(scope)
+            ? "待我处理"
+            : ("table".equals(scope) || "managed".equals(scope)) ? "需求总表" : "我的需求";
     return xlsx(file, name);
   }
   /** 导出当前筛选条件下可见的公示。 */

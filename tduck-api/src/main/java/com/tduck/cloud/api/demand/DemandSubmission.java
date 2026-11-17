@@ -22,7 +22,7 @@ public class DemandSubmission {
     if (entity.getId() != null) throw new BaseException("新增需求不能指定记录标识");
     boolean anonymous = Boolean.TRUE.equals(entity.getDemandAnonymous());
     if (backend) {
-      access.requireAdmin(userId);
+      access.requireGlobalAdmin(userId);
       entity.setCreateBy(String.valueOf(userId));
     } else {
       access.requireFill(entity.getFormKey(), userId, anonymous);

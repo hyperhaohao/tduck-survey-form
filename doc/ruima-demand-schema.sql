@@ -2,13 +2,35 @@
 CREATE TABLE IF NOT EXISTS rm_demand_form (
  form_key VARCHAR(64) PRIMARY KEY, summary VARCHAR(2000), visibility VARCHAR(16) NOT NULL DEFAULT 'LOGIN',
  allow_anonymous BOOLEAN NOT NULL DEFAULT FALSE, published BOOLEAN NOT NULL DEFAULT FALSE,
- end_time TIMESTAMP NULL, revision INT NOT NULL DEFAULT 0
+ end_time TIMESTAMP NULL, voided BOOLEAN NOT NULL DEFAULT FALSE,
+ voided_by BIGINT NULL, voided_at TIMESTAMP NULL, deleted_by BIGINT NULL, deleted_at TIMESTAMP NULL,
+ revision INT NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS rm_demand_acl (
  form_key VARCHAR(64) NOT NULL, user_id BIGINT NOT NULL, can_fill BOOLEAN NOT NULL DEFAULT FALSE,
  can_handle BOOLEAN NOT NULL DEFAULT FALSE, can_manage BOOLEAN NOT NULL DEFAULT FALSE,
  PRIMARY KEY(form_key,user_id)
 );
+CREATE TABLE IF NOT EXISTS rm_demand_dept (
+ dept_key VARCHAR(64) PRIMARY KEY, name VARCHAR(100) NOT NULL, parent_key VARCHAR(64) NULL,
+ path VARCHAR(512) NOT NULL, sort_no INT NOT NULL DEFAULT 0, active BOOLEAN NOT NULL DEFAULT TRUE,
+ synced_at TIMESTAMP NULL
+);
+CREATE INDEX idx_rm_demand_dept_parent ON rm_demand_dept(parent_key);
+CREATE INDEX idx_rm_demand_dept_path ON rm_demand_dept(path);
+CREATE TABLE IF NOT EXISTS rm_demand_user_dept (
+ user_id BIGINT NOT NULL, dept_key VARCHAR(64) NOT NULL,
+ PRIMARY KEY(user_id,dept_key)
+);
+CREATE INDEX idx_rm_demand_user_dept_dept ON rm_demand_user_dept(dept_key);
+CREATE TABLE IF NOT EXISTS rm_demand_acl_dept (
+ form_key VARCHAR(64) NOT NULL, dept_key VARCHAR(64) NOT NULL,
+ can_fill BOOLEAN NOT NULL DEFAULT FALSE, can_handle BOOLEAN NOT NULL DEFAULT FALSE,
+ can_manage BOOLEAN NOT NULL DEFAULT FALSE, created_by BIGINT NULL,
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ PRIMARY KEY(form_key,dept_key)
+);
+CREATE INDEX idx_rm_demand_acl_dept_key ON rm_demand_acl_dept(dept_key);
 CREATE TABLE IF NOT EXISTS rm_demand_admin (user_id BIGINT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS rm_demand (
  id VARCHAR(36) PRIMARY KEY, data_id VARCHAR(32) NOT NULL UNIQUE, form_key VARCHAR(64) NOT NULL,

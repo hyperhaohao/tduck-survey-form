@@ -11,6 +11,7 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.tduck.cloud.common.constant.CommonConstants;
 import com.tduck.cloud.common.entity.BaseEntity;
+import com.tduck.cloud.common.exception.BaseException;
 import com.tduck.cloud.common.util.Result;
 import com.tduck.cloud.common.validator.ValidatorUtils;
 import com.tduck.cloud.common.validator.group.AddGroup;
@@ -329,7 +330,13 @@ public class UserFormController {
     @PostMapping("/user/form/item/batch/create")
     public Result batchCreateFormItem(@RequestBody List<UserFormItemEntity> itemEntityList) {
         if (null != itemEntityList && !itemEntityList.isEmpty()) {
-            FormAuthUtils.hasPermission(itemEntityList.get(0).getFormKey());
+            String formKey = itemEntityList.get(0).getFormKey();
+            FormAuthUtils.hasPermission(formKey);
+            for (UserFormItemEntity item : itemEntityList) {
+                if (!formKey.equals(item.getFormKey())) {
+                    throw new BaseException("批量表单项必须属于同一表单");
+                }
+            }
         }
         //排序下标计算
         itemEntityList.forEach(item -> item.setSort(sortUtils.getInitialSortPosition(item.getFormKey())));
@@ -440,7 +447,7 @@ public class UserFormController {
      */
     @PostMapping("/user/form/recycle/restore")
     public Result restoreRecycleForm(@RequestBody UserFormEntity request) {
-        FormAuthUtils.hasPermission(request.getFormKey());
+        FormAuthUtils.hasPermission(request.getFormKey(), true);
         boolean flag = formService.update(new UserFormEntity() {{
             setDeleted(Boolean.FALSE);
         }}, Wrappers.<UserFormEntity>lambdaQuery().eq(UserFormEntity::getFormKey, request.getFormKey()));

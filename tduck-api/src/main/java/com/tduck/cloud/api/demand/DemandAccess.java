@@ -21,14 +21,18 @@ public class DemandAccess {
   public boolean enabled() {
     return properties.isEnabled();
   }
-  /** 普通登录不自动获得管理权限。 */
-  public boolean admin(Long userId) {
+  /** 全局管理员：原系统超级管理员或配置项，拥有全部收集单能力。 */
+  public boolean globalAdmin(Long userId) {
     return userId != null
         && (SecurityUtils.isAdmin(userId)
-            || (enabled()
-                && (properties.getAdminIds().contains(userId)
-                    || store.count("SELECT COUNT(*) FROM rm_demand_admin WHERE user_id=?", userId)
-                        > 0)));
+            || (enabled() && properties.getAdminIds().contains(userId)));
+  }
+  /** 后台管理员：可进入后台并建单，数据仍按收集单授权。 */
+  public boolean consoleAdmin(Long userId) {
+    return globalAdmin(userId)
+        || (userId != null
+            && enabled()
+            && store.count("SELECT COUNT(*) FROM rm_demand_admin WHERE user_id=?", userId) > 0);
   }
   /** 本地账户停用后立即拒绝访问，不等令牌自然过期。 */
   public void requireActive(Long userId) {
@@ -40,53 +44,116 @@ public class DemandAccess {
   public void requireEnabled() {
     if (!enabled()) throw new BaseException("需求模块尚未启用");
   }
-  /** 要求管理员权限。 */
-  public void requireAdmin(Long userId) {
+  /** 要求全局管理员权限。 */
+  public void requireGlobalAdmin(Long userId) {
     requireEnabled();
-    if (!admin(userId)) throw new BaseException("仅管理员可执行此操作", 403);
+    if (!globalAdmin(userId)) throw new BaseException("仅全局管理员可执行此操作", 403);
+  }
+  /** 要求后台管理员权限，具体数据范围仍由收集单授权决定。 */
+  public void requireConsoleAdmin(Long userId) {
+    requireEnabled();
+    if (!consoleAdmin(userId)) throw new BaseException("仅后台管理员可执行此操作", 403);
   }
   /** 查询收集单扩展配置。 */
   public Map<String, Object> form(String key) {
     return enabled() ? store.one("SELECT * FROM rm_demand_form WHERE form_key=?", key) : null;
   }
+  /** 用户直授与部门授权的有效集合；部门授权默认包含下级部门。 */
+  public DemandGrants effectiveGrants(Long userId) {
+    DemandGrants grants = new DemandGrants();
+    if (userId == null || !enabled()) return grants;
+    for (Map<String, Object> row :
+        store.rows(
+            "SELECT form_key,can_fill,can_handle,can_manage FROM rm_demand_acl WHERE user_id=?",
+            userId))
+      grants.add(
+          String.valueOf(row.get("formKey")),
+          row.get("canFill"),
+          row.get("canHandle"),
+          row.get("canManage"));
+    for (Map<String, Object> row :
+        store.rows(
+            "SELECT ad.form_key,ad.can_fill,ad.can_handle,ad.can_manage FROM rm_demand_acl_dept ad "
+                + "JOIN rm_demand_user_dept ud ON ud.user_id=? "
+                + "JOIN rm_demand_dept pd ON pd.dept_key=ud.dept_key AND pd.active=TRUE "
+                + "JOIN rm_demand_dept gd ON gd.dept_key=ad.dept_key AND gd.active=TRUE "
+                + "WHERE pd.path=gd.path OR LOCATE(CONCAT(gd.path,'/'),pd.path)=1",
+            userId))
+      grants.add(
+          String.valueOf(row.get("formKey")),
+          row.get("canFill"),
+          row.get("canHandle"),
+          row.get("canManage"));
+    return grants;
+  }
   /** 判断指定账户是否具有经办权限。 */
   public boolean handler(String key, Long userId) {
+    return userId != null && effectiveGrants(userId).canHandle(key);
+  }
+  /** 单据管理员可管理本收集单的全部需求，全局管理员天然拥有该能力。 */
+  public boolean manage(String key, Long userId) {
+    return globalAdmin(userId) || (userId != null && effectiveGrants(userId).canManage(key));
+  }
+  /** 是否可查看总表：经办人、单据管理员或全局管理员。 */
+  public boolean table(String key, Long userId) {
+    if (globalAdmin(userId)) return true;
+    if (userId == null) return false;
+    DemandGrants grants = effectiveGrants(userId);
+    return grants.canHandle(key) || grants.canManage(key);
+  }
+  /** 是否有其他有效单据管理员；部门直授要求至少一名在职成员。 */
+  public boolean hasOtherManager(String key, Long excludeUserId, String excludeDeptKey) {
+    StringBuilder users =
+        new StringBuilder(
+            "SELECT COUNT(*) FROM rm_demand_acl WHERE form_key=? AND can_manage=TRUE");
+    List<Object> userArgs = new ArrayList<>();
+    userArgs.add(key);
+    if (excludeUserId != null) {
+      users.append(" AND user_id<>?");
+      userArgs.add(excludeUserId);
+    }
+    if (store.count(users.toString(), userArgs.toArray()) > 0) return true;
+    StringBuilder departments =
+        new StringBuilder(
+            "SELECT COUNT(*) FROM rm_demand_acl_dept ad "
+                + "JOIN rm_demand_dept gd ON gd.dept_key=ad.dept_key AND gd.active=TRUE "
+                + "WHERE ad.form_key=? AND ad.can_manage=TRUE");
+    List<Object> departmentArgs = new ArrayList<>();
+    departmentArgs.add(key);
+    if (excludeDeptKey != null) {
+      departments.append(" AND ad.dept_key<>?");
+      departmentArgs.add(excludeDeptKey);
+    }
+    departments.append(
+        " AND EXISTS(SELECT 1 FROM rm_demand_user_dept ud "
+            + "JOIN rm_demand_dept pd ON pd.dept_key=ud.dept_key AND pd.active=TRUE "
+            + "JOIN ac_user u ON u.id=ud.user_id AND u.deleted=FALSE "
+            + "WHERE pd.path=gd.path OR LOCATE(CONCAT(gd.path,'/'),pd.path)=1)");
+    return store.count(departments.toString(), departmentArgs.toArray()) > 0;
+  }
+  /** 是否原表单创建人，用于首次配置的自有表单。 */
+  public boolean owner(String key, Long userId) {
     return userId != null
         && store.count(
-                "SELECT COUNT(*) FROM rm_demand_acl WHERE form_key=? AND user_id=? AND can_handle=TRUE",
+                "SELECT COUNT(*) FROM fm_user_form WHERE form_key=? AND user_id=? AND is_deleted=FALSE",
                 key,
                 userId)
             > 0;
   }
-  /** 单据管理员可管理本收集单的全部需求，全局管理员天然拥有该能力。 */
-  public boolean manage(String key, Long userId) {
-    return admin(userId)
-        || (userId != null
-            && store.count(
-                    "SELECT COUNT(*) FROM rm_demand_acl WHERE form_key=? AND user_id=? AND can_manage=TRUE",
-                    key,
-                    userId)
-                > 0);
-  }
-  /** 是否可查看总表：经办人、单据管理员或全局管理员。 */
-  public boolean table(String key, Long userId) {
-    return admin(userId) || handler(key, userId) || manage(key, userId);
-  }
 
   /** 是否在填报名单中。 */
   public boolean visible(Map<String, Object> form, Long userId) {
-    return userId != null
-        && ("LOGIN".equals(form.get("visibility"))
-            || store.count(
-                    "SELECT COUNT(*) FROM rm_demand_acl WHERE form_key=? AND user_id=? AND can_fill=TRUE",
-                    form.get("formKey"),
-                    userId)
-                > 0);
+    if (userId == null) return false;
+    return "LOGIN".equals(form.get("visibility"))
+        || effectiveGrants(userId).canFill(String.valueOf(form.get("formKey")));
   }
   /** 校验填报方式、发布状态和截止时间，不能用匿名绕过名单。 */
   public void requireFill(String key, Long userId, boolean anonymous) {
     Map<String, Object> form = form(key);
     if (form == null) return;
+    if (store.count("SELECT COUNT(*) FROM fm_user_form WHERE form_key=? AND is_deleted=FALSE", key)
+        == 0) throw new BaseException("该收集单已删除");
+    if (flag(form.get("voided"))) throw new BaseException("该收集单已作废");
     if (!flag(form.get("published"))) throw new BaseException("该收集单尚未开放");
     if (form.get("endTime") instanceof java.util.Date
         && ((java.util.Date) form.get("endTime")).getTime() < System.currentTimeMillis())
@@ -127,24 +194,17 @@ public class DemandAccess {
     m.put("enabled", enabled());
     if (!enabled() || userId == null) {
       m.put("admin", false);
+      m.put("global", false);
       m.put("handler", false);
       m.put("manage", false);
       return m;
     }
-    m.put("admin", admin(userId));
-    m.put(
-        "handler",
-        store.count(
-                "SELECT COUNT(*) FROM rm_demand_acl WHERE user_id=? AND (can_handle=TRUE OR can_manage=TRUE)",
-                userId)
-            > 0);
-    m.put(
-        "manage",
-        admin(userId)
-            || store.count(
-                    "SELECT COUNT(*) FROM rm_demand_acl WHERE user_id=? AND can_manage=TRUE",
-                    userId)
-                > 0);
+    boolean global = globalAdmin(userId);
+    DemandGrants grants = effectiveGrants(userId);
+    m.put("admin", consoleAdmin(userId));
+    m.put("global", global);
+    m.put("handler", grants.anyHandle());
+    m.put("manage", global || grants.anyManage());
     m.put(
         "mineUnread",
         store.count(
@@ -154,20 +214,34 @@ public class DemandAccess {
     StringBuilder pendingWhere =
         new StringBuilder(" WHERE f.is_deleted=FALSE");
     List<Object> pendingArgs = new ArrayList<>();
-    DemandScope.pending(pendingWhere, pendingArgs, userId);
+    DemandScope.pending(pendingWhere, pendingArgs, userId, grants);
     m.put(
         "pending",
         store.count(
             "SELECT COUNT(*) FROM rm_demand d JOIN fm_user_form f ON f.form_key=d.form_key"
                 + pendingWhere,
             pendingArgs.toArray()));
+    StringBuilder publicationUnread =
+        new StringBuilder(
+            "SELECT COUNT(*) FROM rm_demand_publication p JOIN rm_demand d ON d.id=p.demand_id JOIN rm_demand_form f ON f.form_key=d.form_key LEFT JOIN rm_demand_read r ON r.object_type='PUBLICATION' AND r.object_id=p.id AND r.user_id=? WHERE p.published=TRUE AND p.version>COALESCE(r.seen_version,0) AND (f.visibility='LOGIN'");
+    List<Object> publicationArgs = new ArrayList<>();
+    publicationArgs.add(userId);
+    if (!global && !grants.allForms().isEmpty()) {
+      publicationUnread.append(" OR f.form_key IN (");
+      boolean first = true;
+      for (String key : grants.allForms()) {
+        if (!first) publicationUnread.append(',');
+        publicationUnread.append('?');
+        publicationArgs.add(key);
+        first = false;
+      }
+      publicationUnread.append(')');
+    }
+    publicationUnread.append(" OR ?=TRUE)");
+    publicationArgs.add(global);
     m.put(
         "publicationUnread",
-        store.count(
-            "SELECT COUNT(*) FROM rm_demand_publication p JOIN rm_demand d ON d.id=p.demand_id JOIN rm_demand_form f ON f.form_key=d.form_key LEFT JOIN rm_demand_read r ON r.object_type='PUBLICATION' AND r.object_id=p.id AND r.user_id=? WHERE p.published=TRUE AND p.version>COALESCE(r.seen_version,0) AND (f.visibility='LOGIN' OR EXISTS(SELECT 1 FROM rm_demand_acl a WHERE a.form_key=f.form_key AND a.user_id=? AND (a.can_fill=TRUE OR a.can_handle=TRUE OR a.can_manage=TRUE)) OR ?=TRUE)",
-            userId,
-            userId,
-            admin(userId)));
+        store.count(publicationUnread.toString(), publicationArgs.toArray()));
     return m;
   }
 }

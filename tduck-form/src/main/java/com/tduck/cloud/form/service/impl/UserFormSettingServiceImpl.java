@@ -66,6 +66,10 @@ public class UserFormSettingServiceImpl extends ServiceImpl<UserFormSettingMappe
 
     @Override
     public FormSettingSchemaStruct getFormSettingSchema(String formKey) {
+        UserFormEntity form = userFormService.getByKey(formKey);
+        if (ObjectUtil.isNull(form) || Boolean.TRUE.equals(form.getDeleted())) {
+            return null;
+        }
         UserFormSettingEntity settingEntity = getFormSettingByKey(formKey);
         if (ObjectUtil.isNull(settingEntity)) {
             return null;
@@ -77,6 +81,9 @@ public class UserFormSettingServiceImpl extends ServiceImpl<UserFormSettingMappe
     @Override
     public Result<Boolean> getUserFormWriteSettingStatus(String formKey, String requestIp, String wxOpenId, Integer type) {
         UserFormEntity userFormEntity = userFormService.getByKey(formKey);
+        if (ObjectUtil.isNull(userFormEntity) || Boolean.TRUE.equals(userFormEntity.getDeleted())) {
+            return Result.success(null, "表单已删除");
+        }
         boolean checkPublish = Objects.equals(type, CommonConstants.ConstantNumber.ONE) &&
                 (ObjectUtil.isNull(userFormEntity) || userFormEntity.getStatus() != FormStatusEnum.RELEASE);
         // 非公开填写 不校验发布状态

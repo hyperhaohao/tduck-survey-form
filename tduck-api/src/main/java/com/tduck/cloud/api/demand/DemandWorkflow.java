@@ -103,7 +103,8 @@ public class DemandWorkflow {
       String submitEnd) {
     List<Object> args = new ArrayList<>();
     StringBuilder where = new StringBuilder(" WHERE f.is_deleted=FALSE ");
-    DemandScope.apply(scope, userId, access.admin(userId), where, args);
+    if ("managed".equals(scope)) access.requireConsoleAdmin(userId);
+    DemandScope.apply(scope, userId, access.globalAdmin(userId), access.effectiveGrants(userId), where, args);
     if (keyword != null && !keyword.isEmpty()) {
       where.append(" AND (d.title LIKE ? OR d.request_no LIKE ? OR f.name LIKE ?)");
       for (int i = 0; i < 3; i++) args.add("%" + keyword + "%");
@@ -142,27 +143,24 @@ public class DemandWorkflow {
   /** 为每行补充当前账户的处理能力，避免前端逐行判断。 */
   private void decorate(List<Map<String, Object>> rows, Long userId) {
     if (rows.isEmpty()) return;
-    boolean admin = access.admin(userId);
-    Set<String> handle = new HashSet<>(), manage = new HashSet<>();
-    for (Map<String, Object> acl :
-        store.rows("SELECT form_key,can_handle,can_manage FROM rm_demand_acl WHERE user_id=?", userId)) {
-      String key = String.valueOf(acl.get("formKey"));
-      if (flag(acl.get("canHandle"))) handle.add(key);
-      if (flag(acl.get("canManage"))) manage.add(key);
-    }
+    boolean global = access.globalAdmin(userId);
+    DemandGrants grants = access.effectiveGrants(userId);
     for (Map<String, Object> row : rows) {
       String key = String.valueOf(row.get("formKey"));
-      row.put("canHandle", handle.contains(key));
-      row.put("canManage", admin || manage.contains(key));
+      row.put("canHandle", grants.canHandle(key));
+      row.put("canManage", global || grants.canManage(key));
     }
   }
   /** 按收集单汇总当前范围的需求数量，供页面先选收集单再下钻。 */
   public List<Map<String, Object>> summary(Long userId, String scope) {
     access.requireEnabled();
     if (userId == null) throw new BaseException("请先登录", 401);
+    if ("managed".equals(scope)) access.requireConsoleAdmin(userId);
+    boolean global = access.globalAdmin(userId);
+    DemandGrants grants = access.effectiveGrants(userId);
     List<Object> args = new ArrayList<>();
     StringBuilder where = new StringBuilder(" WHERE f.is_deleted=FALSE ");
-    DemandScope.apply(scope, userId, access.admin(userId), where, args);
+    DemandScope.apply(scope, userId, global, grants, where, args);
     List<Object> rowArgs = new ArrayList<>();
     rowArgs.add(userId);
     rowArgs.addAll(args);
@@ -177,15 +175,8 @@ public class DemandWorkflow {
                 + where
                 + " GROUP BY d.form_key,f.name ORDER BY last_update DESC,d.form_key",
             rowArgs.toArray());
-    boolean admin = access.admin(userId);
-    Set<String> managed = new HashSet<>();
-    if (!admin)
-      for (Map<String, Object> acl :
-          store.rows(
-              "SELECT form_key FROM rm_demand_acl WHERE user_id=? AND can_manage=TRUE", userId))
-        managed.add(String.valueOf(acl.get("formKey")));
     for (Map<String, Object> row : rows)
-      row.put("canManage", admin || managed.contains(String.valueOf(row.get("formKey"))));
+      row.put("canManage", global || grants.canManage(String.valueOf(row.get("formKey"))));
     return rows;
   }
   /** 读取需求，查询码、本人身份及总表权限严格隔离。 */
@@ -365,11 +356,27 @@ public class DemandWorkflow {
   public List<Map<String, Object>> publications(Long userId) {
     access.requireEnabled();
     if (userId == null) throw new BaseException("请先登录", 401);
-    return store.rows(
-        "SELECT p.id,p.title,p.summary,p.decision,p.progress,p.version,p.update_time,d.form_key,d.request_no,d.submitter_name,d.create_time,u.name AS form_name,h.name AS handler_name,CASE WHEN p.version>COALESCE(r.seen_version,0) THEN TRUE ELSE FALSE END AS unread FROM rm_demand_publication p JOIN rm_demand d ON d.id=p.demand_id JOIN rm_demand_form f ON f.form_key=d.form_key JOIN fm_user_form u ON u.form_key=d.form_key LEFT JOIN ac_user h ON h.id=d.handler_id LEFT JOIN rm_demand_read r ON r.object_type='PUBLICATION' AND r.object_id=p.id AND r.user_id=? WHERE p.published=TRUE AND (f.visibility='LOGIN' OR EXISTS(SELECT 1 FROM rm_demand_acl a WHERE a.form_key=f.form_key AND a.user_id=? AND (a.can_fill=TRUE OR a.can_handle=TRUE OR a.can_manage=TRUE)) OR ?=TRUE) ORDER BY p.update_time DESC",
-        userId,
-        userId,
-        access.admin(userId));
+    boolean global = access.globalAdmin(userId);
+    DemandGrants grants = access.effectiveGrants(userId);
+    StringBuilder sql =
+        new StringBuilder(
+            "SELECT p.id,p.title,p.summary,p.decision,p.progress,p.version,p.update_time,d.form_key,d.request_no,d.submitter_name,d.create_time,u.name AS form_name,h.name AS handler_name,CASE WHEN p.version>COALESCE(r.seen_version,0) THEN TRUE ELSE FALSE END AS unread FROM rm_demand_publication p JOIN rm_demand d ON d.id=p.demand_id JOIN rm_demand_form f ON f.form_key=d.form_key JOIN fm_user_form u ON u.form_key=d.form_key LEFT JOIN ac_user h ON h.id=d.handler_id LEFT JOIN rm_demand_read r ON r.object_type='PUBLICATION' AND r.object_id=p.id AND r.user_id=? WHERE p.published=TRUE AND (f.visibility='LOGIN'");
+    List<Object> args = new ArrayList<>();
+    args.add(userId);
+    if (!global && !grants.allForms().isEmpty()) {
+      sql.append(" OR d.form_key IN (");
+      boolean first = true;
+      for (String key : grants.allForms()) {
+        if (!first) sql.append(',');
+        sql.append('?');
+        args.add(key);
+        first = false;
+      }
+      sql.append(')');
+    }
+    sql.append(" OR ?=TRUE) ORDER BY p.update_time DESC");
+    args.add(global);
+    return store.rows(sql.toString(), args.toArray());
   }
   /** 返回公示快照，仅包含人工审核后的字段。 */
   public Map<String, Object> publication(String id, Long userId) {
@@ -405,6 +412,7 @@ public class DemandWorkflow {
       message(id, userId, "AUDIT", "撤回公示");
       return;
     }
+    requireReply(id);
     String title = text(body.get("title"), 200),
         summary = text(body.get("summary"), 2000),
         content = text(body.get("content"), 20000);
@@ -444,6 +452,7 @@ public class DemandWorkflow {
       result.put("unchanged", true);
       return result;
     }
+    requireReply(id);
     String title = clip(str(d.get("title")), 200);
     if (title.isEmpty()) title = "需求公示";
     String reason = str(d.get("reason")), completion = str(d.get("completion"));
@@ -528,6 +537,12 @@ public class DemandWorkflow {
       for (Object child : (Collection<?>) value) if (containsUrl(child, url)) return true;
     }
     return false;
+  }
+  /** 公示前必须有面向填报者的正式回复，内部备注和草稿不能替代。 */
+  private void requireReply(String id) {
+    if (store.count(
+            "SELECT COUNT(*) FROM rm_demand_message WHERE demand_id=? AND kind='REPLY'", id)
+        == 0) throw new BaseException("公示前必须先发布正式回复", 409);
   }
   /** 追加有来源的操作或回复。 */
   private void message(String id, Long userId, String kind, String content) {
