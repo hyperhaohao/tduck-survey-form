@@ -252,7 +252,7 @@ public class DemandForms {
     access.requireManage(key, userId);
     List<Map<String, Object>> rows =
         store.rows(
-            "SELECT a.user_id,u.name,a.can_fill,a.can_handle,a.can_manage FROM rm_demand_acl a JOIN ac_user u ON u.id=a.user_id WHERE a.form_key=?",
+            "SELECT a.user_id,u.name,a.can_fill,a.can_handle,a.can_manage FROM rm_demand_acl a JOIN ac_user u ON u.id=a.user_id WHERE a.form_key=? ORDER BY u.name,a.user_id",
             key);
     normalizeMemberFlags(rows);
     return rows;
@@ -310,6 +310,21 @@ public class DemandForms {
         flag(body.get("canFill")),
         flag(body.get("canHandle")),
         canManage);
+  }
+  /** 移除成员授权；最后一名单据管理员不可移除。 */
+  @Transactional
+  public void removeMember(String key, Long memberId, Long userId) {
+    access.requireConsoleAdmin(userId);
+    access.requireManage(key, userId);
+    if (store.one("SELECT form_key FROM rm_demand_form WHERE form_key=? FOR UPDATE", key) == null)
+      throw new BaseException("请先保存需求收集配置");
+    Map<String, Object> old =
+        store.one(
+            "SELECT can_manage FROM rm_demand_acl WHERE form_key=? AND user_id=?", key, memberId);
+    if (old == null) return;
+    if (flag(old.get("canManage")) && !access.hasOtherManager(key, memberId, null))
+      throw new BaseException("每个收集单至少保留一名有效单据管理员");
+    store.update("DELETE FROM rm_demand_acl WHERE form_key=? AND user_id=?", key, memberId);
   }
   /** 管理页面仅返回必要的账户标识和姓名。 */
   public List<Map<String, Object>> users(String keyword, Long userId) {

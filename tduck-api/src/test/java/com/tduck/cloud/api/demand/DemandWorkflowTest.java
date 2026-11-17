@@ -269,6 +269,47 @@ class DemandWorkflowTest {
   }
 
   @Test
+  void memberRemovalProtectsLastManager() {
+    jdbc.update(
+        "INSERT INTO fm_user_form(form_key,name,description,status,user_id) VALUES('B','设备改善','测试',2,20)");
+    forms.configure(
+        "B", body("visibility", "LOGIN", "allowAnonymous", false, "published", true), 1L);
+    BaseException error =
+        assertThrows(BaseException.class, () -> forms.removeMember("B", 20L, 1L));
+    assertTrue(error.getMessage().contains("至少保留一名有效单据管理员"));
+    forms.member("B", 30L, body("canManage", true), 1L);
+    forms.removeMember("B", 20L, 1L);
+    List<Map<String, Object>> members = forms.members("B", 1L);
+    assertEquals(1, members.size());
+    assertEquals(30L, number(members.get(0).get("userId")));
+  }
+
+  @Test
+  void memberRemovalDeletesGrantAndIsIdempotent() {
+    forms.removeMember("A", 30L, 1L);
+    List<Map<String, Object>> members = forms.members("A", 1L);
+    assertFalse(members.stream().anyMatch(row -> number(row.get("userId")) == 30L));
+    assertFalse(access.handler("A", 30L));
+    forms.removeMember("A", 30L, 1L);
+  }
+
+  @Test
+  void memberRemovalAllowsDepartmentManager() {
+    jdbc.update("INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(40,'D2')");
+    departments.save("A", "D1", body("canManage", true), 1L);
+    forms.removeMember("A", 50L, 1L);
+    assertFalse(access.manage("A", 50L));
+    assertTrue(access.manage("A", 40L));
+  }
+
+  @Test
+  void memberRemovalMissingGrantIsNoop() {
+    int before = forms.members("A", 1L).size();
+    forms.removeMember("A", 10L, 1L);
+    assertEquals(before, forms.members("A", 1L).size());
+  }
+
+  @Test
   void departmentManageGrantScopesConsoleAdminForms() {
     jdbc.update("INSERT INTO rm_demand_admin(user_id) VALUES(60)");
     jdbc.update("INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(60,'D3')");
@@ -1125,5 +1166,21 @@ class DemandWorkflowTest {
         .andExpect(
             org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
                 .value(200));
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete(
+                    "/demand-api/admin/forms/A/members/30")
+                .header("token", "qa30"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
+                .value(403));
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete(
+                    "/demand-api/admin/forms/A/members/30")
+                .header("token", "qa1"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
+                .value(200));
+    assertFalse(
+        forms.members("A", 1L).stream().anyMatch(row -> number(row.get("userId")) == 30L));
   }
 }

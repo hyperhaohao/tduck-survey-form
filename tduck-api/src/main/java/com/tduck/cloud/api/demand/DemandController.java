@@ -102,6 +102,13 @@ public class DemandController {
     forms.member(key, memberId, body, user(r));
     return Result.success();
   }
+  /** 移除指定人员授权。 */
+  @DeleteMapping("/admin/forms/{key}/members/{memberId}")
+  public Result<?> removeMember(
+      @PathVariable String key, @PathVariable Long memberId, HttpServletRequest r) {
+    forms.removeMember(key, memberId, user(r));
+    return Result.success();
+  }
   /** 可授权部门列表。 */
   @GetMapping("/admin/departments")
   public Result<?> departments(HttpServletRequest r) {
