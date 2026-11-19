@@ -7,11 +7,13 @@ import com.tduck.cloud.form.service.UserFormItemService;
 import com.tduck.cloud.form.vo.FormFieldVO;
 import java.util.*;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /** 需求列表、分派、回复、采纳与实施进度服务。 */
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class DemandWorkflow {
@@ -226,9 +228,13 @@ public class DemandWorkflow {
       d.remove("handlerId");
       d.remove("dataId");
     }
-    d.put("originalData", store.json(raw.get("originalData")));
+    Map<String, Object> original = new LinkedHashMap<>(store.json(raw.get("originalData")));
+    original.remove("demandDept");
+    original.remove("demandDeptlabel");
+    d.put("department", formFields.resolve(d.get("department"), original, anonymous));
+    d.put("originalData", original);
     List<FormFieldVO> fieldList = new ArrayList<>(fields.listFormFields(formKey));
-    formFields.decorateFormFields(formKey, fieldList);
+    fieldList.removeIf(formFields::isDepartmentField);
     d.put("formFields", fieldList);
     d.put("canViewTable", staff);
     d.put("canManage", manage);
@@ -276,6 +282,24 @@ public class DemandWorkflow {
     d.put("publication", publication);
     return d;
   }
+  /** 单据管理员或全局管理员删除需求；原答卷保留，消息、已读和公示一并清理。 */
+  @Transactional
+  public void deleteDemand(String id, Long revision, Long userId) {
+    Map<String, Object> d = demand(id, userId, null, true);
+    String formKey = d.get("formKey").toString();
+    access.requireManage(formKey, userId);
+    checkRevision(d, revision);
+    // 统一锁顺序：先需求，后公示。
+    store.rows("SELECT id FROM rm_demand_publication WHERE demand_id=? FOR UPDATE", id);
+    store.update(
+        "DELETE FROM rm_demand_read WHERE object_type='PUBLICATION' AND object_id IN (SELECT id FROM rm_demand_publication WHERE demand_id=?)",
+        id);
+    store.update("DELETE FROM rm_demand_publication WHERE demand_id=?", id);
+    store.update("DELETE FROM rm_demand_message WHERE demand_id=?", id);
+    store.update("DELETE FROM rm_demand_read WHERE object_type='DEMAND' AND object_id=?", id);
+    store.update("DELETE FROM rm_demand WHERE id=?", id);
+    log.info("删除需求 id={} formKey={} operator={}", id, formKey, userId);
+  }
   /** 单据管理员或全局管理员分派给已授权经办人，支持并发版本校验。 */
   @Transactional
   public void assign(String id, Long handlerId, long revision, Long userId) {
@@ -298,14 +322,14 @@ public class DemandWorkflow {
     checkRevision(d, number(body.get("revision")));
     String decision = String.valueOf(body.get("decision"));
     String progress = String.valueOf(body.get("progress"));
-    if (!Arrays.asList("PENDING", "ACCEPTED", "DEFERRED", "REJECTED").contains(decision))
-      throw new BaseException("采纳结果无效");
+    if (!Arrays.asList("ACCEPTED", "DEFERRED", "REJECTED").contains(decision))
+      throw new BaseException("请选择采纳结果（采纳/暂缓/不采纳）");
     String reason = body.get("reason") == null ? "" : body.get("reason").toString().trim();
     String completion =
         body.get("completion") == null ? "" : body.get("completion").toString().trim();
     if (reason.length() > 10000 || completion.length() > 10000)
       throw new BaseException("说明不能超过10000字");
-    if (!"PENDING".equals(decision) && reason.isEmpty()) throw new BaseException("请填写采纳结果说明");
+    if (reason.isEmpty()) throw new BaseException("请填写采纳结果说明");
     if ("ACCEPTED".equals(decision)) {
       if (!Arrays.asList("PLANNED", "IN_PROGRESS", "COMPLETED").contains(progress))
         throw new BaseException("请选择实施进度");
@@ -501,7 +525,7 @@ public class DemandWorkflow {
       message(id, userId, "AUDIT", "撤回公示");
       return;
     }
-    requireReply(id);
+    requireDecision(d);
     String title = text(body.get("title"), 200),
         summary = text(body.get("summary"), 2000),
         content = text(body.get("content"), 20000);
@@ -541,7 +565,7 @@ public class DemandWorkflow {
       result.put("unchanged", true);
       return result;
     }
-    requireReply(id);
+    requireDecision(d);
     String title = clip(str(d.get("title")), 200);
     if (title.isEmpty()) title = "需求公示";
     String reason = str(d.get("reason")), completion = str(d.get("completion"));
@@ -554,7 +578,7 @@ public class DemandWorkflow {
     if (content.isEmpty()) content = summary;
     if (summary.isEmpty()) summary = content;
     if (summary.isEmpty() || content.isEmpty())
-      throw new BaseException("缺少采纳说明或正式回复，无法自动生成公示");
+      throw new BaseException("缺少采纳说明，无法自动生成公示");
     if (old == null)
       store.update(
           "INSERT INTO rm_demand_publication(id,demand_id,title,summary,content,published,version,decision,progress) VALUES(?,?,?,?,?,TRUE,1,?,?)",
@@ -614,14 +638,17 @@ public class DemandWorkflow {
   /** 单据管理员归档或恢复公示；归档后员工端不再展示，可恢复。 */
   @Transactional
   public void archivePublication(String publicationId, Map<String, Object> body, Long userId) {
+    Map<String, Object> peek =
+        store.one("SELECT demand_id FROM rm_demand_publication WHERE id=?", publicationId);
+    if (peek == null) throw new BaseException("公示不存在", 404);
+    String demandId = peek.get("demandId").toString();
+    Map<String, Object> d = demand(demandId, userId, null, true);
+    access.requireManage(d.get("formKey").toString(), userId);
     Map<String, Object> old =
         store.one(
             "SELECT demand_id,version,published,deleted_at FROM rm_demand_publication WHERE id=? FOR UPDATE",
             publicationId);
     if (old == null) throw new BaseException("公示不存在", 404);
-    String demandId = old.get("demandId").toString();
-    Map<String, Object> d = demand(demandId, userId, null, true);
-    access.requireManage(d.get("formKey").toString(), userId);
     if (old.get("deletedAt") != null) throw new BaseException("公示已删除", 409);
     if (!flag(old.get("published"))) throw new BaseException("公示未发布", 409);
     long expected = number(body.getOrDefault("version", 0));
@@ -643,14 +670,17 @@ public class DemandWorkflow {
   /** 单据管理员删除公示；保留记录与审计，需求可重新发布或跳过。 */
   @Transactional
   public void deletePublication(String publicationId, Map<String, Object> body, Long userId) {
+    Map<String, Object> peek =
+        store.one("SELECT demand_id FROM rm_demand_publication WHERE id=?", publicationId);
+    if (peek == null) throw new BaseException("公示不存在", 404);
+    String demandId = peek.get("demandId").toString();
+    Map<String, Object> d = demand(demandId, userId, null, true);
+    access.requireManage(d.get("formKey").toString(), userId);
     Map<String, Object> old =
         store.one(
             "SELECT demand_id,version,published,deleted_at FROM rm_demand_publication WHERE id=? FOR UPDATE",
             publicationId);
     if (old == null) throw new BaseException("公示不存在", 404);
-    String demandId = old.get("demandId").toString();
-    Map<String, Object> d = demand(demandId, userId, null, true);
-    access.requireManage(d.get("formKey").toString(), userId);
     if (old.get("deletedAt") != null) return;
     if (!flag(old.get("published"))) throw new BaseException("公示未发布", 409);
     long expected = number(body.getOrDefault("version", 0));
@@ -683,11 +713,11 @@ public class DemandWorkflow {
     }
     return false;
   }
-  /** 公示前必须有面向填报者的正式回复，内部备注和草稿不能替代。 */
-  private void requireReply(String id) {
-    if (store.count(
-            "SELECT COUNT(*) FROM rm_demand_message WHERE demand_id=? AND kind='REPLY'", id)
-        == 0) throw new BaseException("公示前必须先发布正式回复", 409);
+  /** 公示前必须有明确的采纳结果，正式回复不是前置条件。 */
+  private void requireDecision(Map<String, Object> demand) {
+    Object decision = demand.get("decision");
+    if (decision == null || "PENDING".equals(String.valueOf(decision)))
+      throw new BaseException("公示前必须先发布明确的采纳结果（采纳/暂缓/不采纳）", 409);
   }
   /** 追加有来源的操作或回复。 */
   private void message(String id, Long userId, String kind, String content) {

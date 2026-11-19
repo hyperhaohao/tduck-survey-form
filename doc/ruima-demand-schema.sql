@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS rm_demand_form (
  allow_anonymous BOOLEAN NOT NULL DEFAULT FALSE, published BOOLEAN NOT NULL DEFAULT FALSE,
  end_time TIMESTAMP NULL, voided BOOLEAN NOT NULL DEFAULT FALSE,
  voided_by BIGINT NULL, voided_at TIMESTAMP NULL, deleted_by BIGINT NULL, deleted_at TIMESTAMP NULL,
- revision INT NOT NULL DEFAULT 0
+ revision INT NOT NULL DEFAULT 0, sort_no INT NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS rm_demand_acl (
  form_key VARCHAR(64) NOT NULL, user_id BIGINT NOT NULL, can_fill BOOLEAN NOT NULL DEFAULT FALSE,
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS rm_demand (
  request_no VARCHAR(64) NOT NULL UNIQUE, title VARCHAR(200) NOT NULL, submitter_id BIGINT NULL, submitter_name VARCHAR(100) NOT NULL,
  anonymous BOOLEAN NOT NULL, submitted_by BIGINT NULL, handler_id BIGINT NULL,
  decision VARCHAR(20) NOT NULL DEFAULT 'PENDING', progress VARCHAR(20) NOT NULL DEFAULT 'NONE',
- reason TEXT, completion TEXT, query_hash VARCHAR(64), revision INT NOT NULL DEFAULT 0,
+ reason TEXT, completion TEXT, department TEXT NULL, query_hash VARCHAR(64), revision INT NOT NULL DEFAULT 0,
  public_version BIGINT NOT NULL DEFAULT 1, publication_skipped BOOLEAN NOT NULL DEFAULT FALSE,
  followup_at TIMESTAMP NULL,
  create_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,

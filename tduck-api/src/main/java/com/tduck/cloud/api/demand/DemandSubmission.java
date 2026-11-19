@@ -22,7 +22,6 @@ public class DemandSubmission {
     if (access.form(entity.getFormKey()) == null) return;
     if (entity.getId() != null) throw new BaseException("新增需求不能指定记录标识");
     boolean anonymous = Boolean.TRUE.equals(entity.getDemandAnonymous());
-    formFields.applyToSubmission(entity, userId, anonymous);
     if (backend) {
       access.requireGlobalAdmin(userId);
       entity.setCreateBy(String.valueOf(userId));
@@ -60,7 +59,7 @@ public class DemandSubmission {
       }
     if (title.length() > 200) title = title.substring(0, 200);
     store.update(
-        "INSERT INTO rm_demand(id,data_id,form_key,request_no,title,submitter_id,submitter_name,anonymous,submitted_by,query_hash) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO rm_demand(id,data_id,form_key,request_no,title,submitter_id,submitter_name,anonymous,submitted_by,query_hash,department) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         demandId,
         String.valueOf(entity.getId()),
         entity.getFormKey(),
@@ -70,7 +69,8 @@ public class DemandSubmission {
         anonymous ? "匿名" : access.name(userId),
         anonymous,
         backend ? userId : null,
-        queryCode == null ? null : hash(queryCode));
+        queryCode == null ? null : hash(queryCode),
+        formFields.snapshotJson(userId, anonymous));
     Map<String, Object> receipt = new LinkedHashMap<>();
     receipt.put("id", demandId);
     receipt.put("requestNo", requestNo);

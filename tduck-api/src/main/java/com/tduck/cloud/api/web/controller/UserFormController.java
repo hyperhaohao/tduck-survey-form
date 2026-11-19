@@ -9,7 +9,6 @@ import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
-import com.tduck.cloud.api.demand.DemandFormFields;
 import com.tduck.cloud.common.constant.CommonConstants;
 import com.tduck.cloud.common.entity.BaseEntity;
 import com.tduck.cloud.common.exception.BaseException;
@@ -65,7 +64,6 @@ public class UserFormController {
     private final UserFormSettingService userFormSettingService;
     private final FormTemplateService formTemplateService;
     private final UserFormLogicService userFormLogicService;
-    private final DemandFormFields demandFormFields;
 
 
     /**
@@ -239,7 +237,6 @@ public class UserFormController {
                 item.setScheme(schemeJson);
             });
         }
-        demandFormFields.decorate(key, formItemList, userId);
         return Result.success(new UserFormDetailVO(new UserFormDetailVO.UserForm(form), formItemList, theme, formLogic));
     }
 

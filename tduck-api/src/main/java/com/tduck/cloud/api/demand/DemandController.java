@@ -24,7 +24,6 @@ public class DemandController {
   private final DemandWorkflow workflow;
   private final DemandExport export;
   private final DemandDepartments departmentService;
-  private final DemandFormFields formFields;
   /** 公开能力开关及登录后的菜单与角标。 */
   @NotLogin
   @GetMapping("/capabilities")
@@ -53,6 +52,12 @@ public class DemandController {
   public Result<?> adminForms(HttpServletRequest r) {
     return Result.success(forms.list(user(r), true));
   }
+  /** 全局管理员保存首页收集单全局顺序。 */
+  @PostMapping("/admin/forms/sort")
+  public Result<?> sortForms(@RequestBody Map<String, Object> body, HttpServletRequest r) {
+    forms.sort(body, user(r));
+    return Result.success();
+  }
   /** 配置收集单发布范围。 */
   @PostMapping("/admin/forms/{key}")
   public Result<?> configure(
@@ -65,12 +70,6 @@ public class DemandController {
   public Result<?> setVoided(
       @PathVariable String key, @RequestBody Map<String, Object> body, HttpServletRequest r) {
     forms.setVoided(key, flag(body.get("voided")), user(r));
-    return Result.success();
-  }
-  /** 确保收集单包含「填报人部门」系统题。 */
-  @PostMapping("/admin/forms/{key}/dept-field")
-  public Result<?> ensureDeptField(@PathVariable String key, HttpServletRequest r) {
-    formFields.ensureDepartmentField(key, user(r));
     return Result.success();
   }
   /** 全局回收站：已逻辑删除的收集单。 */
@@ -320,6 +319,13 @@ public class DemandController {
   public Result<?> outcome(
       @PathVariable String id, @RequestBody Map<String, Object> body, HttpServletRequest r) {
     workflow.outcome(id, body, user(r));
+    return Result.success();
+  }
+  /** 单据管理员或全局管理员删除需求，原答卷保留。 */
+  @PostMapping("/requests/{id}/delete")
+  public Result<?> deleteDemand(
+      @PathVariable String id, @RequestBody Map<String, Object> body, HttpServletRequest r) {
+    workflow.deleteDemand(id, number(body.get("revision")), user(r));
     return Result.success();
   }
   /** 追加正式回复、内部备注或草稿。 */

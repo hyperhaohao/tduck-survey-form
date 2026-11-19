@@ -1,4 +1,6 @@
 -- 2026-11-19 为存量需求收集单补「填报人部门」系统题。
+-- 已由 ruima-demand-migration-20261119-demand-delete-dept-sort.sql 取代：
+-- 部门题不再注入并会从存量表单删除；新环境不要执行本脚本。
 -- 可重复执行；只新增 fm_user_form_item 数据，不修改表结构。
 -- 已有实例先备份，再按 迁移 → 后端 → 前端 的顺序部署。
 INSERT INTO fm_user_form_item

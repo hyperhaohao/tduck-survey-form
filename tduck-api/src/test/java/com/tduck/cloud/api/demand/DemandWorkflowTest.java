@@ -90,8 +90,8 @@ class DemandWorkflowTest {
     properties = new DemandProperties();
     properties.setEnabled(true);
     access = new DemandAccess(store, properties, users);
-    formFields = new DemandFormFields(store, access);
-    forms = new DemandForms(store, access, formFields);
+    formFields = new DemandFormFields(store);
+    forms = new DemandForms(store, access);
     departments = new DemandDepartments(store, access);
     UserFormItemService fields = mock(UserFormItemService.class);
     when(fields.listFormFields(anyString())).thenReturn(Collections.emptyList());
@@ -437,90 +437,137 @@ class DemandWorkflowTest {
 
   @Test
   @SuppressWarnings("unchecked")
-  void departmentFieldDecoratesAndOverridesSubmission() {
-    formFields.ensureDepartmentField("A", 1L);
-    formFields.ensureDepartmentField("A", 1L);
-    assertEquals(1L, store.count("SELECT COUNT(*) FROM fm_user_form_item WHERE form_key='A'"));
-    Map<String, Object> row =
-        store.one("SELECT type,CAST(scheme AS VARCHAR) AS scheme FROM fm_user_form_item WHERE form_key='A'");
-    assertEquals("SELECT", row.get("type"));
-    assertTrue(String.valueOf(row.get("scheme")).contains("demandDept"));
+  void departmentSnapshotRecordedAndLegacyKeysFiltered() {
+    jdbc.update("INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(10,'D1'),(10,'D2')");
+    String id = create(100, 10L, false);
+    Map<String, Object> stored = store.one("SELECT department FROM rm_demand WHERE id=?", id);
+    String snapshot = String.valueOf(stored.get("department"));
+    assertTrue(snapshot.contains("总部 / 技术部"));
+    assertTrue(snapshot.contains("总部 / 技术部 / 研发组"));
+    Map<String, Object> detail = workflow.detail(id, 10L, null);
+    List<String> departments = (List<String>) detail.get("department");
+    assertTrue(departments.contains("总部 / 技术部"));
+    assertTrue(departments.contains("总部 / 技术部 / 研发组"));
+    assertTrue(((List<?>) detail.get("formFields")).isEmpty());
 
-    jdbc.update("INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(30,'D1'),(30,'D2')");
-    List<UserFormItemEntity> items = new ArrayList<>();
-    items.add(departmentItem());
-    formFields.decorate("A", items, 30L);
-    Map<String, Object> scheme = items.get(0).getScheme();
-    assertEquals(Boolean.TRUE, scheme.get("disabled"));
-    Map<String, Object> config = (Map<String, Object>) scheme.get("config");
-    List<String> values = (List<String>) config.get("defaultValue");
-    assertTrue(values.contains("总部 / 技术部"));
-    assertTrue(values.contains("总部 / 技术部 / 研发组"));
-    List<Map<String, Object>> options = (List<Map<String, Object>>) config.get("options");
-    assertTrue(options.stream().anyMatch(option -> "无".equals(option.get("value"))));
+    jdbc.update(
+        "UPDATE fm_user_form_data SET original_data=? WHERE id=100",
+        "{\"title\":\"改进建议\",\"demandDept\":[\"旧部门\"],\"demandDeptlabel\":[\"旧部门\"]}");
+    Map<String, Object> legacy = workflow.detail(id, 10L, null);
+    Map<String, Object> original = (Map<String, Object>) legacy.get("originalData");
+    assertFalse(original.containsKey("demandDept"));
+    assertFalse(original.containsKey("demandDeptlabel"));
+    assertEquals(departments, legacy.get("department"));
 
-    List<UserFormItemEntity> anonymous = new ArrayList<>();
-    anonymous.add(departmentItem());
-    formFields.decorate("A", anonymous, null);
+    String anonymous = create(101, 10L, true);
+    Map<String, Object> anonymousRow =
+        store.one("SELECT department FROM rm_demand WHERE id=?", anonymous);
+    assertEquals("[\"无\"]", anonymousRow.get("department"));
+
+    jdbc.update(
+        "INSERT INTO fm_user_form(form_key,name,description,status,user_id) VALUES('C','新收集单','测试',2,1)");
+    forms.configure(
+        "C", body("visibility", "LOGIN", "allowAnonymous", false, "published", true), 1L);
     assertEquals(
-        Collections.singletonList("无"),
-        ((Map<String, Object>) anonymous.get(0).getScheme().get("config")).get("defaultValue"));
+        0L, store.count("SELECT COUNT(*) FROM fm_user_form_item WHERE form_key='C'"));
 
-    List<UserFormItemEntity> injected = new ArrayList<>();
-    formFields.decorate("A", injected, 20L);
-    assertEquals(1, injected.size());
-    assertEquals("demandDept", injected.get(0).getFormItemId());
-
-    List<UserFormItemEntity> other = new ArrayList<>();
-    formFields.decorate("B", other, 1L);
-    assertEquals(0, other.size());
-    assertThrows(BaseException.class, () -> formFields.ensureDepartmentField("B", 1L));
-
-    Map<String, Object> data = new LinkedHashMap<>();
-    data.put("demandDept", Collections.singletonList("伪造"));
     UserFormDataEntity entity = new UserFormDataEntity();
     entity.setFormKey("A");
-    entity.setOriginalData(data);
+    Map<String, Object> originalData = new LinkedHashMap<>();
+    originalData.put("title", "保持原样");
+    entity.setOriginalData(originalData);
     entity.setDemandAnonymous(false);
-    submission.before(entity, 30L, false);
-    List<String> overridden = (List<String>) entity.getOriginalData().get("demandDept");
-    assertTrue(overridden.contains("总部 / 技术部"));
-    assertFalse(overridden.contains("伪造"));
-
-    entity.setDemandAnonymous(true);
-    submission.before(entity, 30L, false);
-    assertEquals(Collections.singletonList("无"), entity.getOriginalData().get("demandDept"));
-
-    // 未落库部门题的历史收集单：填写与详情都会补题，且重复调用不重复插入。
-    jdbc.update(
-        "INSERT INTO fm_user_form(form_key,name,description,status,user_id) VALUES('C','补题收集单','测试',2,1)");
-    jdbc.update(
-        "INSERT INTO rm_demand_form(form_key,visibility,allow_anonymous,published) VALUES('C','LOGIN',FALSE,TRUE)");
-    List<UserFormItemEntity> backfill = new ArrayList<>();
-    formFields.decorate("C", backfill, 30L);
-    assertEquals(1, backfill.size());
-    assertEquals(1L, store.count("SELECT COUNT(*) FROM fm_user_form_item WHERE form_key='C'"));
-    List<UserFormItemEntity> repeated = new ArrayList<>();
-    formFields.decorate("C", repeated, 30L);
-    assertEquals(1L, store.count("SELECT COUNT(*) FROM fm_user_form_item WHERE form_key='C'"));
-    List<FormFieldVO> detailFields = new ArrayList<>();
-    formFields.decorateFormFields("C", detailFields);
-    assertEquals(1, detailFields.size());
-    assertEquals("填报人部门", detailFields.get(0).getLabel());
-    formFields.decorateFormFields("C", detailFields);
-    assertEquals(1, detailFields.size());
+    submission.before(entity, 10L, false);
+    assertFalse(entity.getOriginalData().containsKey("demandDept"));
   }
 
-  private UserFormItemEntity departmentItem() {
-    UserFormItemEntity item = new UserFormItemEntity();
-    item.setFormItemId("demandDept");
-    Map<String, Object> config = new LinkedHashMap<>();
-    config.put("demandDept", true);
-    Map<String, Object> scheme = new LinkedHashMap<>();
-    scheme.put("typeId", "SELECT");
-    scheme.put("config", config);
-    item.setScheme(scheme);
-    return item;
+  @Test
+  void outcomeRejectsPendingAndRequiresReason() {
+    String id = create(100, 10L, false);
+    assignTo(id, 30);
+    assertThrows(BaseException.class, () -> outcome(id, "PENDING", "NONE", "", ""));
+    assertThrows(BaseException.class, () -> outcome(id, "ACCEPTED", "PLANNED", "", ""));
+    assertThrows(BaseException.class, () -> outcome(id, "DEFERRED", "NONE", "", ""));
+    outcome(id, "DEFERRED", "NONE", "暂缓说明", "");
+    Map<String, Object> row =
+        store.one("SELECT decision,progress,completion FROM rm_demand WHERE id=?", id);
+    assertEquals("DEFERRED", row.get("decision"));
+    assertEquals("NONE", row.get("progress"));
+    assertEquals("", row.get("completion"));
+  }
+
+  @Test
+  void managerDeletesDemandAndWorkflowArtifactsButKeepsAnswer() {
+    String id = create(100, 10L, false);
+    assignTo(id, 30);
+    outcome(id, "ACCEPTED", "PLANNED", "采纳说明", "");
+    workflow.reply(id, "REPLY", "正式回复", 30L);
+    workflow.publish(
+        id,
+        body("published", true, "version", 0, "title", "公示标题", "summary", "摘要", "content", "正文"),
+        50L);
+    String publicationId =
+        String.valueOf(
+            store.one("SELECT id FROM rm_demand_publication WHERE demand_id=?", id).get("id"));
+    workflow.read("DEMAND", id, 99L, 10L);
+    workflow.read("PUBLICATION", publicationId, 99L, 10L);
+    workflow.deleteDemand(id, revision(id), 50L);
+    assertEquals(0L, store.count("SELECT COUNT(*) FROM rm_demand WHERE id=?", id));
+    assertEquals(0L, store.count("SELECT COUNT(*) FROM rm_demand_message WHERE demand_id=?", id));
+    assertEquals(
+        0L, store.count("SELECT COUNT(*) FROM rm_demand_publication WHERE demand_id=?", id));
+    assertEquals(
+        0L,
+        store.count(
+            "SELECT COUNT(*) FROM rm_demand_read WHERE object_type='DEMAND' AND object_id=?", id));
+    assertEquals(
+        0L,
+        store.count(
+            "SELECT COUNT(*) FROM rm_demand_read WHERE object_type='PUBLICATION' AND object_id=?",
+            publicationId));
+    assertEquals(1L, store.count("SELECT COUNT(*) FROM fm_user_form_data WHERE id=100"));
+  }
+
+  @Test
+  void deleteDemandChecksPermissionAndRevision() {
+    String id = create(100, 10L, false);
+    assignTo(id, 30);
+    outcome(id, "ACCEPTED", "PLANNED", "采纳说明", "");
+    long current = revision(id);
+    assertThrows(BaseException.class, () -> workflow.deleteDemand(id, current, 30L));
+    assertThrows(BaseException.class, () -> workflow.deleteDemand(id, current - 1, 50L));
+    assertEquals(1L, store.count("SELECT COUNT(*) FROM rm_demand WHERE id=?", id));
+    workflow.deleteDemand(id, current, 50L);
+    assertEquals(0L, store.count("SELECT COUNT(*) FROM rm_demand WHERE id=?", id));
+
+    String other = create(101, 10L, false);
+    workflow.deleteDemand(other, revision(other), 1L);
+    assertEquals(0L, store.count("SELECT COUNT(*) FROM rm_demand WHERE id=?", other));
+  }
+
+  @Test
+  void formSortPersistsGlobalOrderAndNewFormFirst() {
+    jdbc.update(
+        "INSERT INTO fm_user_form(form_key,name,description,status,user_id) VALUES('B','B表单','测试',2,1),('C','C表单','测试',2,1)");
+    jdbc.update(
+        "INSERT INTO rm_demand_form(form_key,visibility,published,sort_no) VALUES('B','LOGIN',TRUE,2),('C','LOGIN',TRUE,3)");
+    jdbc.update("UPDATE rm_demand_form SET sort_no=1 WHERE form_key='A'");
+    forms.sort(body("formKeys", Arrays.asList("B", "A")), 1L);
+    List<Map<String, Object>> rows =
+        store.rows("SELECT form_key FROM rm_demand_form ORDER BY sort_no,form_key");
+    assertEquals("B", rows.get(0).get("formKey"));
+    assertEquals("A", rows.get(1).get("formKey"));
+    assertEquals("C", rows.get(2).get("formKey"));
+    assertThrows(BaseException.class, () -> forms.sort(body("formKeys", Arrays.asList("A")), 60L));
+    assertThrows(
+        BaseException.class, () -> forms.sort(body("formKeys", Arrays.asList("A", "Z")), 1L));
+
+    jdbc.update(
+        "INSERT INTO fm_user_form(form_key,name,description,status,user_id) VALUES('D','D表单','测试',2,1)");
+    forms.configure(
+        "D", body("visibility", "LOGIN", "allowAnonymous", false, "published", true), 1L);
+    List<Map<String, Object>> list = forms.list(1L, false);
+    assertEquals("D", list.get(0).get("formKey"));
   }
 
   @Test
@@ -603,6 +650,8 @@ class DemandWorkflowTest {
             > 0);
     Map<String, Object> second = workflow.skipPublication(id, revision, 50L);
     assertEquals(false, second.get("changed"));
+    assignTo(id, 30);
+    outcome(id, "DEFERRED", "NONE", "暂缓说明", "");
     workflow.reply(id, "REPLY", "正式回复", 50L);
     workflow.publish(
         id,
@@ -646,32 +695,35 @@ class DemandWorkflowTest {
     String fallback = create(102, 10L, false);
     assignTo(fallback, 30);
     outcome(fallback, "DEFERRED", "NONE", "暂缓说明", "");
-    assertThrows(
-        BaseException.class, () -> workflow.autoPublish(fallback, revision(fallback), 50L));
-    workflow.reply(fallback, "REPLY", "正式回复", 30L);
     workflow.autoPublish(fallback, revision(fallback), 50L);
     Map<String, Object> fallbackPublication =
         store.one("SELECT summary,content FROM rm_demand_publication WHERE demand_id=?", fallback);
     assertEquals("暂缓说明", fallbackPublication.get("summary"));
-    assertEquals("正式回复", fallbackPublication.get("content"));
+    assertEquals("暂缓说明", fallbackPublication.get("content"));
   }
 
   @Test
-  void publicationRequiresFormalReply() {
+  void publicationRequiresExplicitDecisionNotReply() {
     String id = create(100, 10L, false);
     assignTo(id, 30);
-    outcome(id, "ACCEPTED", "PLANNED", "采纳说明", "");
     Map<String, Object> publication =
         body(
             "published", true, "version", 0, "title", "公示标题", "summary", "摘要", "content", "正文");
     assertThrows(BaseException.class, () -> workflow.publish(id, publication, 50L));
     assertThrows(BaseException.class, () -> workflow.autoPublish(id, revision(id), 50L));
-    workflow.reply(id, "NOTE", "内部备注", 30L);
-    assertThrows(BaseException.class, () -> workflow.publish(id, publication, 50L));
-    assertThrows(BaseException.class, () -> workflow.autoPublish(id, revision(id), 50L));
-    workflow.reply(id, "REPLY", "正式回复", 30L);
+    outcome(id, "DEFERRED", "NONE", "暂缓说明", "");
     workflow.publish(id, publication, 50L);
     assertEquals(1, workflow.publications(20L, false).size());
+
+    String auto = create(101, 10L, false);
+    assignTo(auto, 30);
+    outcome(auto, "ACCEPTED", "PLANNED", "采纳说明", "");
+    Map<String, Object> result = workflow.autoPublish(auto, revision(auto), 50L);
+    assertEquals(Boolean.TRUE, result.get("published"));
+    Map<String, Object> row =
+        store.one("SELECT summary,content FROM rm_demand_publication WHERE demand_id=?", auto);
+    assertEquals("采纳说明", row.get("summary"));
+    assertEquals("采纳说明", row.get("content"));
   }
 
   @Test
@@ -709,6 +761,8 @@ class DemandWorkflowTest {
   @Test
   void exportPublicationsRespectsAudienceAndFilters() throws Exception {
     String id = create(100, 10L, false);
+    assignTo(id, 30);
+    outcome(id, "DEFERRED", "NONE", "暂缓说明", "");
     workflow.reply(id, "REPLY", "正式回复", 1L);
     workflow.publish(
         id,
@@ -1104,6 +1158,8 @@ class DemandWorkflowTest {
     assertEquals(0L, workflow.list(50L, "pending", "", "", "", "", "", "", "", 1, 20).get("total"));
 
     String second = create(101, 10L, false);
+    assignTo(second, 30);
+    outcome(second, "DEFERRED", "NONE", "暂缓说明", "");
     workflow.reply(second, "REPLY", "正式回复", 1L);
     workflow.publish(
         second,
@@ -1122,6 +1178,8 @@ class DemandWorkflowTest {
   @Test
   void selectedFormPublicationRespectsAudience() {
     String id = create(100, 10L, false);
+    assignTo(id, 30);
+    outcome(id, "DEFERRED", "NONE", "暂缓说明", "");
     workflow.reply(id, "REPLY", "正式回复", 1L);
     workflow.publish(
         id,
@@ -1416,6 +1474,8 @@ class DemandWorkflowTest {
     String id = create(100, 10L, false);
     jdbc.update("INSERT INTO rm_demand_admin(user_id) VALUES(60)");
     assignTo(id, 30);
+    String deletedId = create(101, 10L, false);
+    assignTo(deletedId, 30);
     com.tduck.cloud.account.util.JwtUtils jwt = mock(com.tduck.cloud.account.util.JwtUtils.class);
     when(jwt.getHeader()).thenReturn("token");
     when(jwt.getClaimByToken(anyString()))
@@ -1433,7 +1493,7 @@ class DemandWorkflowTest {
     when(sessions.verifyToken(anyString(), anyLong())).thenReturn(true);
     org.springframework.test.web.servlet.MockMvc mvc =
         org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
-                new DemandController(access, forms, workflow, export, departments, formFields, store))
+                new DemandController(access, forms, workflow, export, departments, store))
             .setControllerAdvice(new com.tduck.cloud.api.exception.BaseExceptionHandler())
             .addInterceptors(
                 new com.tduck.cloud.api.web.interceptor.AuthorizationInterceptor(jwt, sessions),
@@ -1499,6 +1559,24 @@ class DemandWorkflowTest {
         .andExpect(
             org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.data")
                 .isEmpty());
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                    "/demand-api/admin/forms/sort")
+                .header("token", "qa60")
+                .contentType("application/json")
+                .content("{\"formKeys\":[\"A\"]}"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
+                .value(403));
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                    "/demand-api/admin/forms/sort")
+                .header("token", "qa1")
+                .contentType("application/json")
+                .content("{\"formKeys\":[\"A\"]}"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
+                .value(200));
     mvc.perform(
             org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get(
                     "/demand-api/admin/roles")
@@ -1576,6 +1654,25 @@ class DemandWorkflowTest {
         .andExpect(
             org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
                 .value(200));
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                    "/demand-api/requests/" + deletedId + "/delete")
+                .header("token", "qa30")
+                .contentType("application/json")
+                .content("{\"revision\":" + revision(deletedId) + "}"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
+                .value(403));
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                    "/demand-api/requests/" + deletedId + "/delete")
+                .header("token", "qa50")
+                .contentType("application/json")
+                .content("{\"revision\":" + revision(deletedId) + "}"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
+                .value(200));
+    assertTrue(store.one("SELECT id FROM rm_demand WHERE id=?", deletedId) == null);
     assertFalse(
         forms.members("A", 1L).stream().anyMatch(row -> number(row.get("userId")) == 30L));
   }

@@ -14,7 +14,6 @@ import org.springframework.transaction.annotation.Transactional;
 public class DemandForms {
   private final DemandStore store;
   private final DemandAccess access;
-  private final DemandFormFields formFields;
   /** 查询当前身份可见的收集单，管理查询不公开名单。 */
   public List<Map<String, Object>> list(Long userId, boolean management) {
     access.requireEnabled();
@@ -22,7 +21,7 @@ public class DemandForms {
     boolean global = access.globalAdmin(userId);
     StringBuilder sql =
         new StringBuilder(
-            "SELECT f.form_key,f.name,f.description,f.status,c.summary,c.visibility,c.allow_anonymous,c.published,c.end_time,c.voided,c.revision,(SELECT COUNT(*) FROM rm_demand d WHERE d.form_key=f.form_key) AS demand_count FROM fm_user_form f "
+            "SELECT f.form_key,f.name,f.description,f.status,c.summary,c.visibility,c.allow_anonymous,c.published,c.end_time,c.voided,c.revision,c.sort_no,(SELECT COUNT(*) FROM rm_demand d WHERE d.form_key=f.form_key) AS demand_count FROM fm_user_form f "
                 + (management ? "LEFT" : "INNER")
                 + " JOIN rm_demand_form c ON c.form_key=f.form_key WHERE f.is_deleted=FALSE AND (f.is_folder=FALSE OR f.is_folder IS NULL)");
     List<Object> args = new ArrayList<>();
@@ -43,7 +42,8 @@ public class DemandForms {
       }
       sql.append(")");
     }
-    sql.append(" ORDER BY f.create_time DESC");
+    sql.append(
+        " ORDER BY CASE WHEN c.sort_no IS NULL THEN 1 ELSE 0 END,c.sort_no,f.create_time DESC,f.form_key");
     List<Map<String, Object>> rows = store.rows(sql.toString(), args.toArray());
     rows.removeIf(
         row ->
@@ -112,15 +112,19 @@ public class DemandForms {
     Map<String, Object> old =
         store.one("SELECT * FROM rm_demand_form WHERE form_key=? FOR UPDATE", key);
     if (old == null) {
+      Map<String, Object> next =
+          store.one("SELECT COALESCE(MIN(sort_no),0)-1 AS next_sort FROM rm_demand_form");
+      long sortNo =
+          next == null || next.get("nextSort") == null ? 0 : number(next.get("nextSort"));
       store.update(
-          "INSERT INTO rm_demand_form(form_key,summary,visibility,allow_anonymous,published,end_time) VALUES(?,?,?,?,?,?)",
+          "INSERT INTO rm_demand_form(form_key,summary,visibility,allow_anonymous,published,end_time,sort_no) VALUES(?,?,?,?,?,?,?)",
           key,
           summary,
           visibility,
           anonymous,
           flag(body.get("published")),
-          endTime);
-      formFields.persistDepartmentField(key);
+          endTime,
+          sortNo);
       grantCreatorManager(key);
     } else {
       long revision = Long.parseLong(String.valueOf(body.getOrDefault("revision", -1)));
@@ -135,6 +139,35 @@ public class DemandForms {
           key);
       if (!access.hasOtherManager(key, null, null)) grantCreatorManager(key);
     }
+  }
+  /** 全局管理员保存首页收集单全局顺序；未出现在请求中的收集单保持原位。 */
+  @Transactional
+  public void sort(Map<String, Object> body, Long userId) {
+    access.requireGlobalAdmin(userId);
+    Object raw = body.get("formKeys");
+    if (!(raw instanceof List)) throw new BaseException("排序内容无效");
+    List<String> requested = new ArrayList<>();
+    Set<String> seen = new HashSet<>();
+    for (Object value : (List<?>) raw) {
+      String key = value == null ? "" : value.toString().trim();
+      if (key.isEmpty()) throw new BaseException("排序内容无效");
+      if (!seen.add(key)) throw new BaseException("排序内容包含重复收集单");
+      requested.add(key);
+    }
+    if (requested.size() > 500) throw new BaseException("一次最多调整500个收集单");
+    List<Map<String, Object>> rows =
+        store.rows("SELECT form_key FROM rm_demand_form ORDER BY sort_no,form_key FOR UPDATE");
+    List<String> current = new ArrayList<>();
+    for (Map<String, Object> row : rows) current.add(String.valueOf(row.get("formKey")));
+    if (!new HashSet<>(current).containsAll(requested))
+      throw new BaseException("收集单列表已变化，请刷新后重试", 409);
+    List<String> merged = new ArrayList<>(current);
+    int index = 0;
+    for (int i = 0; i < merged.size(); i++) {
+      if (seen.contains(merged.get(i))) merged.set(i, requested.get(index++));
+    }
+    for (int i = 0; i < merged.size(); i++)
+      store.update("UPDATE rm_demand_form SET sort_no=? WHERE form_key=?", i + 1, merged.get(i));
   }
   /** 作废后停止新填报并从员工入口隐藏，需求历史保留，可恢复。 */
   @Transactional
