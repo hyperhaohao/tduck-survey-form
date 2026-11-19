@@ -24,6 +24,7 @@ public class DemandController {
   private final DemandWorkflow workflow;
   private final DemandExport export;
   private final DemandDepartments departmentService;
+  private final DemandFormFields formFields;
   /** 公开能力开关及登录后的菜单与角标。 */
   @NotLogin
   @GetMapping("/capabilities")
@@ -64,6 +65,12 @@ public class DemandController {
   public Result<?> setVoided(
       @PathVariable String key, @RequestBody Map<String, Object> body, HttpServletRequest r) {
     forms.setVoided(key, flag(body.get("voided")), user(r));
+    return Result.success();
+  }
+  /** 确保收集单包含「填报人部门」系统题。 */
+  @PostMapping("/admin/forms/{key}/dept-field")
+  public Result<?> ensureDeptField(@PathVariable String key, HttpServletRequest r) {
+    formFields.ensureDepartmentField(key, user(r));
     return Result.success();
   }
   /** 全局回收站：已逻辑删除的收集单。 */
@@ -113,6 +120,50 @@ public class DemandController {
   @GetMapping("/admin/departments")
   public Result<?> departments(HttpServletRequest r) {
     return Result.success(departmentService.list(user(r)));
+  }
+  /** 部门成员名册。 */
+  @GetMapping("/admin/departments/members")
+  public Result<?> departmentRoster(HttpServletRequest r) {
+    return Result.success(departmentService.roster(user(r)));
+  }
+  /** 新建部门。 */
+  @PostMapping("/admin/departments")
+  public Result<?> createDepartment(@RequestBody Map<String, Object> body, HttpServletRequest r) {
+    return Result.success(departmentService.create(body, user(r)));
+  }
+  /** 修改部门名称、上级或排序。 */
+  @PutMapping("/admin/departments/{deptKey}")
+  public Result<?> updateDepartment(
+      @PathVariable String deptKey, @RequestBody Map<String, Object> body, HttpServletRequest r) {
+    departmentService.update(deptKey, body, user(r));
+    return Result.success();
+  }
+  /** 删除没有下级、成员和授权的部门。 */
+  @DeleteMapping("/admin/departments/{deptKey}")
+  public Result<?> deleteDepartment(@PathVariable String deptKey, HttpServletRequest r) {
+    departmentService.delete(deptKey, user(r));
+    return Result.success();
+  }
+  /** 把成员加入部门。 */
+  @PostMapping("/admin/departments/{deptKey}/members/{memberId}")
+  public Result<?> addDepartmentMember(
+      @PathVariable String deptKey, @PathVariable Long memberId, HttpServletRequest r) {
+    departmentService.addMember(deptKey, memberId, user(r));
+    return Result.success();
+  }
+  /** 从部门移除成员。 */
+  @DeleteMapping("/admin/departments/{deptKey}/members/{memberId}")
+  public Result<?> removeDepartmentMember(
+      @PathVariable String deptKey, @PathVariable Long memberId, HttpServletRequest r) {
+    departmentService.removeMember(deptKey, memberId, user(r));
+    return Result.success();
+  }
+  /** 整体设置成员的所属部门。 */
+  @PutMapping("/admin/users/{memberId}/departments")
+  public Result<?> setMemberDepartments(
+      @PathVariable Long memberId, @RequestBody Map<String, Object> body, HttpServletRequest r) {
+    departmentService.setUserDepartments(memberId, body, user(r));
+    return Result.success();
   }
   /** 收集单部门授权。 */
   @GetMapping("/admin/forms/{key}/department-members")
@@ -278,6 +329,13 @@ public class DemandController {
     workflow.reply(id, String.valueOf(body.get("kind")), text(body.get("content"), 10000), user(r));
     return Result.success();
   }
+  /** 填报者对本人需求发起追问。 */
+  @PostMapping("/requests/{id}/followup")
+  public Result<?> followUp(
+      @PathVariable String id, @RequestBody Map<String, Object> body, HttpServletRequest r) {
+    workflow.followUp(id, text(body.get("content"), 10000), user(r));
+    return Result.success();
+  }
   /** 保存实际阅读到的版本。 */
   @PostMapping("/read")
   public Result<?> read(@RequestBody Map<String, Object> body, HttpServletRequest r) {
@@ -309,10 +367,25 @@ public class DemandController {
     return Result.success(
         workflow.skipPublication(id, number(body.get("revision")), user(r)));
   }
-  /** 内部已审核公示列表。 */
+  /** 单据管理员归档、恢复或删除公示。 */
+  @PostMapping("/publications/{id}/archive")
+  public Result<?> archivePublication(
+      @PathVariable String id, @RequestBody Map<String, Object> body, HttpServletRequest r) {
+    workflow.archivePublication(id, body, user(r));
+    return Result.success();
+  }
+  @PostMapping("/publications/{id}/delete")
+  public Result<?> deletePublication(
+      @PathVariable String id, @RequestBody Map<String, Object> body, HttpServletRequest r) {
+    workflow.deletePublication(id, body, user(r));
+    return Result.success();
+  }
+  /** 内部已审核公示列表；单据管理员可要求包含已归档项。 */
   @GetMapping("/publications")
-  public Result<?> publications(HttpServletRequest r) {
-    return Result.success(workflow.publications(user(r)));
+  public Result<?> publications(
+      @RequestParam(required = false, defaultValue = "false") boolean includeArchived,
+      HttpServletRequest r) {
+    return Result.success(workflow.publications(user(r), includeArchived));
   }
   /** 内部公示详情。 */
   @GetMapping("/publications/{id}")

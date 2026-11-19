@@ -9,6 +9,7 @@ import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.tduck.cloud.api.demand.DemandFormFields;
 import com.tduck.cloud.common.constant.CommonConstants;
 import com.tduck.cloud.common.entity.BaseEntity;
 import com.tduck.cloud.common.exception.BaseException;
@@ -64,6 +65,7 @@ public class UserFormController {
     private final UserFormSettingService userFormSettingService;
     private final FormTemplateService formTemplateService;
     private final UserFormLogicService userFormLogicService;
+    private final DemandFormFields demandFormFields;
 
 
     /**
@@ -218,12 +220,12 @@ public class UserFormController {
      */
     @GetMapping("/user/form/details/{key}")
     @PermitAll
-    public Result queryFormDetails(@PathVariable @NotBlank String key) {
+    public Result queryFormDetails(@PathVariable @NotBlank String key, @RequestAttribute(required = false) Long userId) {
         UserFormEntity form = formService.getByKey(key);
         if (ObjectUtil.isNull(form)) {
             return Result.success();
         }
-        List<UserFormItemEntity> formItemList = formItemService.list(Wrappers.<UserFormItemEntity>lambdaQuery().ne(UserFormItemEntity::getHideType, 1).eq(UserFormItemEntity::getFormKey, key));
+        List<UserFormItemEntity> formItemList = new ArrayList<>(formItemService.list(Wrappers.<UserFormItemEntity>lambdaQuery().ne(UserFormItemEntity::getHideType, 1).eq(UserFormItemEntity::getFormKey, key)));
         formItemList.sort(Comparator.comparing(UserFormItemEntity::getSort));
         UserFormThemeEntity theme = userFormThemeService.getByKey(key);
         UserFormLogicEntity formLogic = userFormLogicService.getOne(Wrappers.<UserFormLogicEntity>lambdaQuery().eq(UserFormLogicEntity::getFormKey, key));
@@ -237,6 +239,7 @@ public class UserFormController {
                 item.setScheme(schemeJson);
             });
         }
+        demandFormFields.decorate(key, formItemList, userId);
         return Result.success(new UserFormDetailVO(new UserFormDetailVO.UserForm(form), formItemList, theme, formLogic));
     }
 

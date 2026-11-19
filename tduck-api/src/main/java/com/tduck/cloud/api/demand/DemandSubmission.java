@@ -16,11 +16,13 @@ import org.springframework.stereotype.Service;
 public class DemandSubmission {
   private final DemandStore store;
   private final DemandAccess access;
+  private final DemandFormFields formFields;
   /** 提交前验证权限并清除客户端伪造的身份和记录标识。 */
   public void before(UserFormDataEntity entity, Long userId, boolean backend) {
     if (access.form(entity.getFormKey()) == null) return;
     if (entity.getId() != null) throw new BaseException("新增需求不能指定记录标识");
     boolean anonymous = Boolean.TRUE.equals(entity.getDemandAnonymous());
+    formFields.applyToSubmission(entity, userId, anonymous);
     if (backend) {
       access.requireGlobalAdmin(userId);
       entity.setCreateBy(String.valueOf(userId));

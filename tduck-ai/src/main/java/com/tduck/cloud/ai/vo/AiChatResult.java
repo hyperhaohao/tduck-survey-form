@@ -96,6 +96,12 @@ public class AiChatResult {
          * 内容
          */
         private String content;
+
+        /**
+         * 思考过程（DeepSeek V4 / reasoner）
+         */
+        @JsonProperty("reasoning_content")
+        private String reasoningContent;
     }
 
     @Data

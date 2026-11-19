@@ -35,7 +35,8 @@ public class EnvConfigRefreshListener {
      */
     @EventListener
     public void envConfigRefreshEvent(EnvConfigRefreshEvent event) {
-        log.debug("配置更新:{}", JsonUtils.objToJson(event.getConfig()));
+        // 只记录配置键，禁止打印 envValue（其中可能包含 API Key 等敏感信息）
+        log.debug("配置更新:{}", event.getConfig().getEnvKey());
         switch (event.getConfig().getEnvKey().trim()) {
             case ConfigConstants.FILE_ENV_CONFIG:
                 OssStorageFactory.build();

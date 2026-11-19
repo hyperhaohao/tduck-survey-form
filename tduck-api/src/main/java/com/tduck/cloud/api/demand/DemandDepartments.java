@@ -27,6 +27,174 @@ public class DemandDepartments {
             + "FROM rm_demand_dept d WHERE d.active=TRUE ORDER BY d.sort_no,d.name");
   }
 
+  /** 部门成员名册：每个有效部门一条记录；未归属任何有效部门的成员 deptKey 为空。 */
+  public List<Map<String, Object>> roster(Long userId) {
+    access.requireConsoleAdmin(userId);
+    return store.rows(
+        "SELECT u.id AS user_id,u.name,d.dept_key FROM ac_user u "
+            + "LEFT JOIN (SELECT ud.user_id,ud.dept_key FROM rm_demand_user_dept ud "
+            + "JOIN rm_demand_dept dd ON dd.dept_key=ud.dept_key AND dd.active=TRUE) d "
+            + "ON d.user_id=u.id WHERE u.deleted=FALSE ORDER BY u.name,d.dept_key");
+  }
+
+  /** 新建部门。 */
+  @Transactional
+  public Map<String, Object> create(Map<String, Object> body, Long userId) {
+    access.requireConsoleAdmin(userId);
+    String name = required(body.get("name"), 100, "部门名称");
+    String parentKey = text(body.get("parentKey"));
+    if (parentKey != null) requireActiveDepartment(parentKey);
+    requireSiblingNameFree(parentKey, name, null);
+    String deptKey =
+        "D" + UUID.randomUUID().toString().replace("-", "").substring(0, 10).toUpperCase(Locale.ROOT);
+    store.update(
+        "INSERT INTO rm_demand_dept(dept_key,name,parent_key,path,sort_no,active) VALUES(?,?,?,?,?,TRUE)",
+        deptKey,
+        name,
+        parentKey,
+        "/" + deptKey,
+        integer(body.get("sortNo")));
+    rebuildPaths();
+    return store.one(
+        "SELECT dept_key,name,parent_key,path,sort_no FROM rm_demand_dept WHERE dept_key=?",
+        deptKey);
+  }
+
+  /** 修改部门名称、上级或排序。 */
+  @Transactional
+  public void update(String deptKey, Map<String, Object> body, Long userId) {
+    access.requireConsoleAdmin(userId);
+    Map<String, Object> department =
+        store.one(
+            "SELECT dept_key,name,parent_key,sort_no FROM rm_demand_dept WHERE dept_key=? AND active=TRUE",
+            deptKey);
+    if (department == null) throw new BaseException("部门不存在或已停用");
+    String name =
+        body.containsKey("name")
+            ? required(body.get("name"), 100, "部门名称")
+            : String.valueOf(department.get("name"));
+    String parentKey =
+        body.containsKey("parentKey")
+            ? text(body.get("parentKey"))
+            : text(department.get("parentKey"));
+    int sortNo =
+        body.containsKey("sortNo")
+            ? integer(body.get("sortNo"))
+            : integer(department.get("sortNo"));
+    if (parentKey != null) {
+      requireActiveDepartment(parentKey);
+      if (parentKey.equals(deptKey)) throw new BaseException("不能把部门设置为自己的下级");
+      String cursor = parentKey;
+      Set<String> seen = new HashSet<>();
+      while (cursor != null && seen.add(cursor)) {
+        if (cursor.equals(deptKey)) throw new BaseException("不能把部门移动到自己的下级部门");
+        Map<String, Object> row =
+            store.one(
+                "SELECT parent_key FROM rm_demand_dept WHERE dept_key=? AND active=TRUE", cursor);
+        cursor = row == null ? null : text(row.get("parentKey"));
+      }
+    }
+    requireSiblingNameFree(parentKey, name, deptKey);
+    store.update(
+        "UPDATE rm_demand_dept SET name=?,parent_key=?,sort_no=? WHERE dept_key=?",
+        name,
+        parentKey,
+        sortNo,
+        deptKey);
+    rebuildPaths();
+  }
+
+  /** 删除没有下级、成员和收集单授权的部门。 */
+  @Transactional
+  public void delete(String deptKey, Long userId) {
+    access.requireConsoleAdmin(userId);
+    if (store.count(
+            "SELECT COUNT(*) FROM rm_demand_dept WHERE dept_key=? AND active=TRUE", deptKey)
+        == 0) throw new BaseException("部门不存在或已停用");
+    if (store.count(
+            "SELECT COUNT(*) FROM rm_demand_dept WHERE parent_key=? AND active=TRUE", deptKey)
+        > 0) throw new BaseException("请先删除或移动下级部门");
+    if (store.count("SELECT COUNT(*) FROM rm_demand_user_dept WHERE dept_key=?", deptKey) > 0)
+      throw new BaseException("请先移除该部门的成员");
+    if (store.count("SELECT COUNT(*) FROM rm_demand_acl_dept WHERE dept_key=?", deptKey) > 0)
+      throw new BaseException("该部门仍有收集单授权，请先移除授权");
+    store.update("DELETE FROM rm_demand_dept WHERE dept_key=?", deptKey);
+    rebuildPaths();
+  }
+
+  /** 把单个成员加入部门。 */
+  @Transactional
+  public void addMember(String deptKey, Long memberId, Long userId) {
+    access.requireConsoleAdmin(userId);
+    requireActiveDepartment(deptKey);
+    requireActiveUser(memberId);
+    if (store.count(
+            "SELECT COUNT(*) FROM rm_demand_user_dept WHERE user_id=? AND dept_key=?",
+            memberId,
+            deptKey)
+        == 0)
+      store.update(
+          "INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(?,?)", memberId, deptKey);
+  }
+
+  /** 从部门移除单个成员。 */
+  @Transactional
+  public void removeMember(String deptKey, Long memberId, Long userId) {
+    access.requireConsoleAdmin(userId);
+    store.update(
+        "DELETE FROM rm_demand_user_dept WHERE user_id=? AND dept_key=?", memberId, deptKey);
+  }
+
+  /** 整体设置成员的所属部门；空清单表示清空。 */
+  @Transactional
+  public void setUserDepartments(Long memberId, Map<String, Object> body, Long userId) {
+    access.requireConsoleAdmin(userId);
+    requireActiveUser(memberId);
+    Set<String> deptKeys = new LinkedHashSet<>();
+    for (Object value : items(body.get("deptKeys"))) {
+      String deptKey = value == null ? "" : value.toString().trim();
+      if (deptKey.isEmpty()) continue;
+      requireActiveDepartment(deptKey);
+      deptKeys.add(deptKey);
+    }
+    store.update("DELETE FROM rm_demand_user_dept WHERE user_id=?", memberId);
+    for (String deptKey : deptKeys)
+      store.update(
+          "INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(?,?)", memberId, deptKey);
+  }
+
+  private void requireActiveDepartment(String deptKey) {
+    if (store.count(
+            "SELECT COUNT(*) FROM rm_demand_dept WHERE dept_key=? AND active=TRUE", deptKey)
+        == 0) throw new BaseException("部门不存在或已停用");
+  }
+
+  private void requireActiveUser(Long memberId) {
+    if (store.count("SELECT COUNT(*) FROM ac_user WHERE id=? AND deleted=FALSE", memberId) == 0)
+      throw new BaseException("成员不存在或已停用");
+  }
+
+  private void requireSiblingNameFree(String parentKey, String name, String excludeKey) {
+    List<Map<String, Object>> rows =
+        parentKey == null
+            ? store.rows(
+                "SELECT dept_key FROM rm_demand_dept WHERE active=TRUE AND parent_key IS NULL AND name=?",
+                name)
+            : store.rows(
+                "SELECT dept_key FROM rm_demand_dept WHERE active=TRUE AND parent_key=? AND name=?",
+                parentKey,
+                name);
+    for (Map<String, Object> row : rows)
+      if (excludeKey == null || !excludeKey.equals(String.valueOf(row.get("deptKey"))))
+        throw new BaseException("同级部门名称已存在");
+  }
+
+  private static String text(Object value) {
+    if (value == null) return null;
+    String text = value.toString().trim();
+    return text.isEmpty() ? null : text;
+  }
+
   /** 收集单的部门授权。 */
   public List<Map<String, Object>> members(String key, Long userId) {
     access.requireConsoleAdmin(userId);

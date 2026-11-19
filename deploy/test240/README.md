@@ -113,6 +113,33 @@ sudo nginx -t
 - 验证：预检 `rm_demand_identity` 无 `user_id=1`、无目标哈希；插入影响 1 行；复核 `user_id=1` 恰 1 行，其余两条身份映射不变。真实 Casdoor 登录后的管理员能力待用户登录核验。
 - 回退：`DELETE FROM rm_demand_identity WHERE identity_hash='fda2520e48cf1c99d453630cb15ef2e5cdc9a6773c0851a79e7a18a0825b7efd';`；必要时用上述备份还原两张表。回退无需重启应用。
 - 未关闭旧账号密码登录，本地 `admin@tduckcloud.com` 保留为应急维护通道，凭据仅在服务器受限 secrets 目录。尚未推送 GitHub。
+- 2026-11-16 密码重置：经 Casdoor 管理接口重置 `ruima-admin` 密码，Casdoor 库内密码已更新为 bcrypt 哈希并通过旧密码校验；新密码明文仅存 240 的 `secrets/ruima-admin-account.json`（root 0600）。该账号同时用于 OpenViking，其他系统需同步更新。真实浏览器登录后的管理员菜单仍待核验。
 - 真实 Key 联调（2026-11-15 23:40）：管理员配置的内网 New API 网关 Base URL 原为 `http://192.168.1.236:3000//v1`（多一个斜杠），网关返回 HTML，测试连接解析失败、流式请求超时；保留 Key 不变，仅把 Base URL 规范为 `/v1` 并保存即时生效。测试连接 453ms 成功；创建流程澄清无需提问、方案 5 题、生成 5 题；设计器合成表单方案 3 题、确认生成并应用成功，最终题目为多选“您常用的沟通方式”、多行文本“您对远程办公的建议”、数字“每周远程办公天数”，未改动的多行文本保留原 `formItemId`；合成表单与题目按 ID 清理，剩余 0 行。
 - 网关当前只提供 `deepseek-flash`、`deepseek-v4-flash` 等模型，没有独立 Pro/Reasoner；深入思考开关使用配置的 `reasoningModelName`，当前与普通模型相同，不会切换到更强模型；网关返回的 `reasoning_content` 仍会在面板展示。若需更强推理，请在网关新增模型后修改 AI 配置。
 - 方案卡出现时自动滚动到卡片顶部，保证「确认并生成」可见；该滚动修复已静态替换，最终 `index.html` SHA256 `4fd3cbca60190cb1d75ba7911e4669524cd572dd658601599a1ef8c63835beb0`，备份 `backups/ai-static-scroll-20261115-pre/`，未重启应用、未改 Nginx。尚未推送 GitHub。
+
+## 十二、2026-11-16 收集单作废与表单级通知权限
+
+- 背景：后台管理员在「后台管理 → 收集单」找不到删除/作废入口；打开通知设置时提示“仅全局管理员可执行此操作”，但设置本身仍能保存。
+- 修复：`DemandGuard.consoleFormAllowed` 放行 `/user/form/wx/`（通知二维码、提醒人查询与删除），控制器仍通过 `FormAuthUtils.hasPermission` 校验该收集单的管理权限；新增 `rm_demand_form.voided` 与 `POST /demand-api/admin/forms/{key}/void`，作废后停止新填报、从员工入口隐藏，已有需求与处理记录保留，可恢复。原表单删除仍走「我的项目 → 删除表单 → 回收站」。
+- 数据库：`rm_demand_form` 新增 `voided BOOLEAN NOT NULL DEFAULT FALSE`；执行前保存 `backups/void-20261116-pre/rm_demand_form.sql`（root 0600）。首次执行迁移，重试部署时检测为已存在并跳过。
+- 构建：后端 53 项隔离测试通过；前端生产构建及 34 项页面回归通过（新增作废、已作废→恢复 2 项）。
+- 部署：应用镜像 `sha256:023c3c60…` → `sha256:734380e3bc1e92e5c1a5a2353d1aaf4eebf7e93bbc8e9b6824f57a7d8abdea2a`；JAR SHA256 `9ff0256dab7849cca9a544c8ac4881cf6abaf9b549b5e51d5fd33f4a363deaf4`；前端 150 个静态文件，`index.html` `4fd3cbca…` → `5ec77ce000c939a4a16a8c85198be15eb0cede18acd41517475fb74f810521fc`；先资源后入口，逐文件 SHA256 校验通过；未改 Nginx，其他容器保持运行。
+- 真实验证（1024×768）：合成收集单作废后 `/demand-api/forms` 不再返回、公开详情 `voided=true`/`allowAnonymous=false`、后台列表 `voided=true`；公开提交返回“该收集单已作废”；恢复后重新可见。浏览器合成表单卡片显示“作废”，确认后出现“已作废”标签与“恢复”按钮，恢复成功；页面运行错误 0。`/user/form/wx/notify-qrcode` 对维护账户返回 HTTP 200/code 200（非全局后台管理员路径由 53 项隔离测试覆盖，未在线上用独立非全局账户复测）。`/ai/status` 仍为已就绪。
+- 首次部署因验收清理脚本使用了错误的表名 `fm_user_item` 触发自动回滚，应用恢复旧镜像；修正为 `fm_user_form_item` 并重试成功。`voided` 列保留，未做破坏性回退。
+- 清理：合成表单、配置、权限与需求按确切 `form_key` 清理，剩余 0 行；未触碰真实收集单。
+- 回退材料：`backups/void-20261116-pre/` 保留部署前 JAR、静态目录、镜像 ID、`index.html` 哈希与 `rm_demand_form` 转储；旧镜像标记为 `ruima/survey-test:rollback-20261116-void`。回退时先恢复静态目录，再切回旧镜像；`voided` 列保留，不回滚删除。
+- 部署来源为本地未提交工作区（后端 HEAD `5176015352771032ccdccafe73d4e3bc4052a78b`、前端 HEAD `5c3cb9dd478540e565d08a9dda7cf5d89a3495fd`；后端 36、前端 29 个修改文件）；尚未推送 GitHub。
+
+## 十三、2026-11-16 超级管理员收集单删除与全局回收站
+
+- 权限：超级管理员（本地 `ac_user.id=1`）可删除任意收集单、恢复任意回收站收集单、彻底删除无需求表单；后台管理员仍限本人创建或 `can_manage` 的收集单。作废权限沿用第十二节。
+- 删除语义：`fm_user_form.is_deleted=TRUE` 逻辑删除并记录 `deleted_by/deleted_at`；`rm_demand`、`fm_user_form_data`、附件和公示保留；收集单从后台列表与员工入口隐藏，可在全局回收站恢复。彻底删除仅允许 `rm_demand` 与 `fm_user_form_data` 均为 0 的表单，事务清理原表单关联表及 `rm_demand_form`/`rm_demand_acl`。
+- 作废审计：`voided_by/voided_at` 记录操作人；恢复作废清空。
+- 数据库：`rm_demand_form` 新增 `voided_by`、`voided_at`、`deleted_by`、`deleted_at`；执行前备份 `backups/delete-20261116-pre/rm_demand_form.sql`。
+- 构建：后端 54 项隔离测试通过；前端生产构建及 36 项页面回归通过（新增删除/回收站恢复/彻底删除 2 项）。
+- 部署：应用镜像 `sha256:734380e3…` → `sha256:13a0f3c618dc68bcdd1e60a143832bed13e870d7b316847ad397f91ca751b02d`；JAR `5f86c82ef8faafbd605197baa1820b0f58b1b7cb12512648c71af92b465aec7d`；前端 150 个静态文件，`index.html` `5ec77ce0…` → `7190d6b86907d238adc3f2a9ed26f02879f2c9af385962dbf034d22db580590f`；未改 Nginx，其他容器保持运行。
+- 真实验证：空收集单作废审计 `voided_by=1`、删除审计 `deleted_by=1`、员工列表隐藏、公开详情 `deleted=true`、提交返回“该收集单已删除”、回收站可见、彻底删除后关联行 0；有 1 条需求与 1 份答卷的收集单删除后回收站显示 1/1，彻底删除被拒，数据保留，恢复后重新可见。1024×768 浏览器删除、恢复、彻底删除（输入名称确认）通过，页面错误 0。合成数据按精确 key 清理，剩余 0 行。
+- 说明：全局回收站同时列出历史上已删除的原表单（截图中的两条“未命名问卷”），非本次验收创建，未清理。
+- 回退材料：`backups/delete-20261116-pre/`；旧镜像 `ruima/survey-test:rollback-20261116-delete`；新增列保留，不回滚删除。
+- 部署来源为本地未提交工作区（后端 HEAD `5176015352771032ccdccafe73d4e3bc4052a78b`、前端 HEAD `5c3cb9dd478540e565d08a9dda7cf5d89a3495fd`）；尚未推送 GitHub。

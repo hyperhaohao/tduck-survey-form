@@ -4,6 +4,7 @@ import static com.tduck.cloud.api.demand.DemandStore.*;
 
 import com.tduck.cloud.common.exception.BaseException;
 import com.tduck.cloud.form.service.UserFormItemService;
+import com.tduck.cloud.form.vo.FormFieldVO;
 import java.util.*;
 import lombok.RequiredArgsConstructor;
 import org.springframework.dao.DuplicateKeyException;
@@ -17,10 +18,11 @@ public class DemandWorkflow {
   private final DemandStore store;
   private final DemandAccess access;
   private final UserFormItemService fields;
+  private final DemandFormFields formFields;
   private static final String FROM =
       " FROM rm_demand d JOIN fm_user_form f ON f.form_key=d.form_key";
   private static final String ROW_SELECT =
-      "SELECT d.id,d.form_key,d.request_no,d.title,d.submitter_name,d.submitted_by,d.handler_id,d.decision,d.progress,d.reason,d.completion,d.create_time,d.update_time,d.public_version,d.publication_skipped,d.revision,f.name AS form_name,h.name AS handler_name,pub.published AS publication_published,pub.version AS publication_version,(SELECT MAX(m.create_time) FROM rm_demand_message m WHERE m.demand_id=d.id AND m.kind='REPLY') AS reply_time,CASE WHEN d.public_version>COALESCE(r.seen_version,1) THEN TRUE ELSE FALSE END AS unread"
+      "SELECT d.id,d.form_key,d.request_no,d.title,d.submitter_name,d.submitted_by,d.handler_id,d.decision,d.progress,d.reason,d.completion,d.create_time,d.update_time,d.public_version,d.publication_skipped,d.followup_at AS followup_at,d.revision,f.name AS form_name,h.name AS handler_name,pub.published AS publication_published,pub.archived_at AS publication_archived_at,pub.deleted_at AS publication_deleted_at,pub.version AS publication_version,(SELECT MAX(m.create_time) FROM rm_demand_message m WHERE m.demand_id=d.id AND m.kind='REPLY') AS reply_time,CASE WHEN d.public_version>COALESCE(r.seen_version,1) THEN TRUE ELSE FALSE END AS unread"
           + FROM
           + " LEFT JOIN ac_user h ON h.id=d.handler_id LEFT JOIN rm_demand_publication pub ON pub.demand_id=d.id LEFT JOIN rm_demand_read r ON r.object_type='DEMAND' AND r.object_id=d.id AND r.user_id=?";
   /** 分页查询，按权限过滤后再统计数量。 */
@@ -149,6 +151,14 @@ public class DemandWorkflow {
       String key = String.valueOf(row.get("formKey"));
       row.put("canHandle", grants.canHandle(key));
       row.put("canManage", global || grants.canManage(key));
+      row.put("followupPending", row.remove("followupAt") != null);
+      Object archived = row.remove("publicationArchivedAt");
+      Object deleted = row.remove("publicationDeletedAt");
+      row.put(
+          "publicationPublished",
+          flag(row.get("publicationPublished")) && archived == null && deleted == null);
+      row.put("publicationArchived", archived != null && deleted == null);
+      row.put("publicationDeleted", deleted != null);
     }
   }
   /** 按收集单汇总当前范围的需求数量，供页面先选收集单再下钻。 */
@@ -164,11 +174,18 @@ public class DemandWorkflow {
     List<Object> rowArgs = new ArrayList<>();
     rowArgs.add(userId);
     rowArgs.addAll(args);
+    String pendingExpression =
+        "pending".equals(scope)
+            ? "COUNT(*)"
+            : "mine".equals(scope)
+                ? "SUM(CASE WHEN d.decision<>'REJECTED' AND d.progress<>'COMPLETED' THEN 1 ELSE 0 END)"
+                : "SUM(CASE WHEN (d.decision<>'REJECTED' AND d.progress<>'COMPLETED') OR d.followup_at IS NOT NULL THEN 1 ELSE 0 END)";
     List<Map<String, Object>> rows =
         store.rows(
             "SELECT d.form_key,f.name AS form_name,COUNT(*) AS total,"
                 + "SUM(CASE WHEN d.public_version>COALESCE(r.seen_version,1) THEN 1 ELSE 0 END) AS unread,"
-                + "SUM(CASE WHEN d.decision<>'REJECTED' AND d.progress<>'COMPLETED' THEN 1 ELSE 0 END) AS pending,"
+                + pendingExpression
+                + " AS pending,"
                 + "MAX(d.update_time) AS last_update"
                 + " FROM rm_demand d JOIN fm_user_form f ON f.form_key=d.form_key"
                 + " LEFT JOIN rm_demand_read r ON r.object_type='DEMAND' AND r.object_id=d.id AND r.user_id=?"
@@ -197,6 +214,8 @@ public class DemandWorkflow {
     String formKey = d.get("formKey").toString();
     boolean staff = access.table(formKey, userId);
     boolean manage = access.manage(formKey, userId);
+    Long submitterId = number(d.get("submitterId"));
+    boolean anonymous = flag(d.get("anonymous"));
     Map<String, Object> raw =
         store.one("SELECT original_data FROM fm_user_form_data WHERE id=?", d.get("dataId"));
     if (raw == null) throw new BaseException("原始需求记录已不存在");
@@ -208,7 +227,9 @@ public class DemandWorkflow {
       d.remove("dataId");
     }
     d.put("originalData", store.json(raw.get("originalData")));
-    d.put("formFields", fields.listFormFields(formKey));
+    List<FormFieldVO> fieldList = new ArrayList<>(fields.listFormFields(formKey));
+    formFields.decorateFormFields(formKey, fieldList);
+    d.put("formFields", fieldList);
     d.put("canViewTable", staff);
     d.put("canManage", manage);
     d.put(
@@ -231,12 +252,28 @@ public class DemandWorkflow {
     else
       d.put(
           "messages",
-          store.rows(messageSql + "kind IN ('REPLY','EVENT') ORDER BY create_time,id", demandId));
+          store.rows(
+              messageSql + "kind IN ('REPLY','EVENT','FOLLOWUP') ORDER BY create_time,id",
+              demandId));
+    boolean collectionActive =
+        store.count(
+                "SELECT COUNT(*) FROM fm_user_form WHERE form_key=? AND is_deleted=FALSE", formKey)
+            > 0;
     d.put(
-        "publication",
+        "canFollowUp",
+        userId != null && !anonymous && userId.equals(submitterId) && collectionActive);
+    d.put("followupPending", d.get("followupAt") != null);
+    Map<String, Object> publication =
         manage
             ? store.one("SELECT * FROM rm_demand_publication WHERE demand_id=?", demandId)
-            : null);
+            : null;
+    if (publication != null) {
+      boolean deleted = publication.get("deletedAt") != null;
+      boolean archived = publication.get("archivedAt") != null;
+      publication.put("archived", archived && !deleted);
+      publication.put("deleted", deleted);
+    }
+    d.put("publication", publication);
     return d;
   }
   /** 单据管理员或全局管理员分派给已授权经办人，支持并发版本校验。 */
@@ -311,10 +348,32 @@ public class DemandWorkflow {
           id,
           userId);
       store.update(
-          "UPDATE rm_demand SET public_version=public_version+1,update_time=CURRENT_TIMESTAMP WHERE id=?",
+          "UPDATE rm_demand SET public_version=public_version+1,followup_at=NULL,update_time=CURRENT_TIMESTAMP WHERE id=?",
           id);
     }
     message(id, userId, kind, content);
+  }
+  /** 填报者追问本人需求，重新进入经办人与单据管理员的待办，不增加填报者未读。 */
+  @Transactional
+  public void followUp(String id, String content, Long userId) {
+    access.requireEnabled();
+    Map<String, Object> d =
+        store.one(
+            "SELECT id,form_key,submitter_id,anonymous FROM rm_demand WHERE id=? FOR UPDATE", id);
+    if (d == null) throw new BaseException("需求不存在或无权访问", 403);
+    if (userId == null
+        || !userId.equals(number(d.get("submitterId")))
+        || flag(d.get("anonymous")))
+      throw new BaseException("仅填报人本人可追问", 403);
+    if (store.count(
+            "SELECT COUNT(*) FROM fm_user_form WHERE form_key=? AND is_deleted=FALSE",
+            d.get("formKey"))
+        == 0) throw new BaseException("该收集单已删除", 403);
+    content = text(content, 10000);
+    store.update(
+        "UPDATE rm_demand SET followup_at=CURRENT_TIMESTAMP,update_time=CURRENT_TIMESTAMP WHERE id=?",
+        id);
+    message(id, userId, "FOLLOWUP", content);
   }
   /** 按客户端实际读到的版本标记已读，防止并发更新被错误清除。 */
   @Transactional
@@ -353,16 +412,35 @@ public class DemandWorkflow {
     }
   }
   /** 公示列表仅查询已发布的人工选定内容，不拼接原始表单正文。 */
-  public List<Map<String, Object>> publications(Long userId) {
+  public List<Map<String, Object>> publications(Long userId, boolean includeArchived) {
     access.requireEnabled();
     if (userId == null) throw new BaseException("请先登录", 401);
     boolean global = access.globalAdmin(userId);
     DemandGrants grants = access.effectiveGrants(userId);
     StringBuilder sql =
         new StringBuilder(
-            "SELECT p.id,p.title,p.summary,p.decision,p.progress,p.version,p.update_time,d.form_key,d.request_no,d.submitter_name,d.create_time,u.name AS form_name,h.name AS handler_name,CASE WHEN p.version>COALESCE(r.seen_version,0) THEN TRUE ELSE FALSE END AS unread FROM rm_demand_publication p JOIN rm_demand d ON d.id=p.demand_id JOIN rm_demand_form f ON f.form_key=d.form_key JOIN fm_user_form u ON u.form_key=d.form_key LEFT JOIN ac_user h ON h.id=d.handler_id LEFT JOIN rm_demand_read r ON r.object_type='PUBLICATION' AND r.object_id=p.id AND r.user_id=? WHERE p.published=TRUE AND (f.visibility='LOGIN'");
+            "SELECT p.id,p.title,p.summary,p.decision,p.progress,p.version,p.update_time,p.archived_at,d.form_key,d.request_no,d.submitter_name,d.create_time,u.name AS form_name,h.name AS handler_name,CASE WHEN p.version>COALESCE(r.seen_version,0) THEN TRUE ELSE FALSE END AS unread FROM rm_demand_publication p JOIN rm_demand d ON d.id=p.demand_id JOIN rm_demand_form f ON f.form_key=d.form_key JOIN fm_user_form u ON u.form_key=d.form_key AND u.is_deleted=FALSE LEFT JOIN ac_user h ON h.id=d.handler_id LEFT JOIN rm_demand_read r ON r.object_type='PUBLICATION' AND r.object_id=p.id AND r.user_id=? WHERE p.published=TRUE AND p.deleted_at IS NULL");
     List<Object> args = new ArrayList<>();
     args.add(userId);
+    if (!includeArchived) {
+      sql.append(" AND p.archived_at IS NULL");
+    } else if (!global) {
+      sql.append(" AND (p.archived_at IS NULL");
+      Set<String> managed = grants.manageForms();
+      if (!managed.isEmpty()) {
+        sql.append(" OR d.form_key IN (");
+        boolean first = true;
+        for (String key : managed) {
+          if (!first) sql.append(',');
+          sql.append('?');
+          args.add(key);
+          first = false;
+        }
+        sql.append(')');
+      }
+      sql.append(')');
+    }
+    sql.append(" AND (f.visibility='LOGIN'");
     if (!global && !grants.allForms().isEmpty()) {
       sql.append(" OR d.form_key IN (");
       boolean first = true;
@@ -376,21 +454,32 @@ public class DemandWorkflow {
     }
     sql.append(" OR ?=TRUE) ORDER BY p.update_time DESC");
     args.add(global);
-    return store.rows(sql.toString(), args.toArray());
+    List<Map<String, Object>> rows = store.rows(sql.toString(), args.toArray());
+    for (Map<String, Object> row : rows) {
+      String key = String.valueOf(row.get("formKey"));
+      row.put("canManage", global || grants.canManage(key));
+      row.put("archived", row.remove("archivedAt") != null);
+    }
+    return rows;
   }
   /** 返回公示快照，仅包含人工审核后的字段。 */
   public Map<String, Object> publication(String id, Long userId) {
     if (userId == null) throw new BaseException("请先登录", 401);
     Map<String, Object> p =
         store.one(
-            "SELECT p.id,p.title,p.summary,p.content,p.decision,p.progress,p.version,p.update_time,d.form_key,u.name AS form_name FROM rm_demand_publication p JOIN rm_demand d ON d.id=p.demand_id JOIN fm_user_form u ON u.form_key=d.form_key WHERE p.id=? AND p.published=TRUE",
+            "SELECT p.id,p.title,p.summary,p.content,p.decision,p.progress,p.version,p.update_time,p.archived_at,d.form_key,u.name AS form_name FROM rm_demand_publication p JOIN rm_demand d ON d.id=p.demand_id JOIN fm_user_form u ON u.form_key=d.form_key AND u.is_deleted=FALSE WHERE p.id=? AND p.published=TRUE AND p.deleted_at IS NULL",
             id);
-    if (p == null) throw new BaseException("公示不存在或已撤回", 403);
-    Map<String, Object> form = access.form(p.get("formKey").toString());
-    if (form == null
-        || (!access.visible(form, userId) && !access.table(p.get("formKey").toString(), userId)))
+    if (p == null) throw new BaseException("公示不存在或已删除", 403);
+    String formKey = p.get("formKey").toString();
+    boolean manage = access.manage(formKey, userId);
+    boolean archived = p.remove("archivedAt") != null;
+    if (archived && !manage) throw new BaseException("公示已归档", 403);
+    Map<String, Object> form = access.form(formKey);
+    if (form == null || (!access.visible(form, userId) && !access.table(formKey, userId)))
       throw new BaseException("无公示阅读权限", 403);
     p.remove("formKey");
+    p.put("archived", archived);
+    p.put("canManage", manage);
     return p;
   }
   /** 单据管理员显式发布或撤回，更新版本后重新触发未读提示。 */
@@ -428,7 +517,7 @@ public class DemandWorkflow {
           d.get("progress"));
     else
       store.update(
-          "UPDATE rm_demand_publication SET title=?,summary=?,content=?,published=TRUE,version=version+1,decision=?,progress=?,update_time=CURRENT_TIMESTAMP WHERE demand_id=?",
+          "UPDATE rm_demand_publication SET title=?,summary=?,content=?,published=TRUE,archived_at=NULL,archived_by=NULL,deleted_at=NULL,deleted_by=NULL,version=version+1,decision=?,progress=?,update_time=CURRENT_TIMESTAMP WHERE demand_id=?",
           title,
           summary,
           content,
@@ -447,7 +536,7 @@ public class DemandWorkflow {
     Map<String, Object> old =
         store.one("SELECT * FROM rm_demand_publication WHERE demand_id=? FOR UPDATE", id);
     Map<String, Object> result = new LinkedHashMap<>();
-    if (old != null && flag(old.get("published"))) {
+    if (old != null && flag(old.get("published")) && old.get("deletedAt") == null) {
       result.put("published", true);
       result.put("unchanged", true);
       return result;
@@ -478,7 +567,7 @@ public class DemandWorkflow {
           d.get("progress"));
     else
       store.update(
-          "UPDATE rm_demand_publication SET title=?,summary=?,content=?,published=TRUE,version=version+1,decision=?,progress=?,update_time=CURRENT_TIMESTAMP WHERE demand_id=?",
+          "UPDATE rm_demand_publication SET title=?,summary=?,content=?,published=TRUE,archived_at=NULL,archived_by=NULL,deleted_at=NULL,deleted_by=NULL,version=version+1,decision=?,progress=?,update_time=CURRENT_TIMESTAMP WHERE demand_id=?",
           title,
           summary,
           content,
@@ -499,8 +588,12 @@ public class DemandWorkflow {
     Map<String, Object> d = demand(id, userId, null, true);
     access.requireManage(d.get("formKey").toString(), userId);
     Map<String, Object> publication =
-        store.one("SELECT published FROM rm_demand_publication WHERE demand_id=? FOR UPDATE", id);
-    if (publication != null && flag(publication.get("published")))
+        store.one(
+            "SELECT published,deleted_at FROM rm_demand_publication WHERE demand_id=? FOR UPDATE",
+            id);
+    if (publication != null
+        && flag(publication.get("published"))
+        && publication.get("deletedAt") == null)
       throw new BaseException("已公示需求不能跳过，请先撤回公示", 409);
     Map<String, Object> result = new LinkedHashMap<>();
     if (flag(d.get("publicationSkipped"))) {
@@ -516,6 +609,58 @@ public class DemandWorkflow {
     result.put("changed", true);
     result.put("skipped", true);
     return result;
+  }
+
+  /** 单据管理员归档或恢复公示；归档后员工端不再展示，可恢复。 */
+  @Transactional
+  public void archivePublication(String publicationId, Map<String, Object> body, Long userId) {
+    Map<String, Object> old =
+        store.one(
+            "SELECT demand_id,version,published,deleted_at FROM rm_demand_publication WHERE id=? FOR UPDATE",
+            publicationId);
+    if (old == null) throw new BaseException("公示不存在", 404);
+    String demandId = old.get("demandId").toString();
+    Map<String, Object> d = demand(demandId, userId, null, true);
+    access.requireManage(d.get("formKey").toString(), userId);
+    if (old.get("deletedAt") != null) throw new BaseException("公示已删除", 409);
+    if (!flag(old.get("published"))) throw new BaseException("公示未发布", 409);
+    long expected = number(body.getOrDefault("version", 0));
+    if (expected != number(old.get("version")))
+      throw new BaseException("公示已变化，请刷新后重试", 409);
+    boolean archived = flag(body.get("archived"));
+    if (archived)
+      store.update(
+          "UPDATE rm_demand_publication SET archived_at=CURRENT_TIMESTAMP,archived_by=?,version=version+1,update_time=CURRENT_TIMESTAMP WHERE id=?",
+          userId,
+          publicationId);
+    else
+      store.update(
+          "UPDATE rm_demand_publication SET archived_at=NULL,archived_by=NULL,version=version+1,update_time=CURRENT_TIMESTAMP WHERE id=?",
+          publicationId);
+    message(demandId, userId, "AUDIT", archived ? "归档公示" : "恢复公示");
+  }
+
+  /** 单据管理员删除公示；保留记录与审计，需求可重新发布或跳过。 */
+  @Transactional
+  public void deletePublication(String publicationId, Map<String, Object> body, Long userId) {
+    Map<String, Object> old =
+        store.one(
+            "SELECT demand_id,version,published,deleted_at FROM rm_demand_publication WHERE id=? FOR UPDATE",
+            publicationId);
+    if (old == null) throw new BaseException("公示不存在", 404);
+    String demandId = old.get("demandId").toString();
+    Map<String, Object> d = demand(demandId, userId, null, true);
+    access.requireManage(d.get("formKey").toString(), userId);
+    if (old.get("deletedAt") != null) return;
+    if (!flag(old.get("published"))) throw new BaseException("公示未发布", 409);
+    long expected = number(body.getOrDefault("version", 0));
+    if (expected != number(old.get("version")))
+      throw new BaseException("公示已变化，请刷新后重试", 409);
+    store.update(
+        "UPDATE rm_demand_publication SET deleted_at=CURRENT_TIMESTAMP,deleted_by=?,version=version+1,update_time=CURRENT_TIMESTAMP WHERE id=?",
+        userId,
+        publicationId);
+    message(demandId, userId, "AUDIT", "删除公示");
   }
 
   /** 验证附件属于该原始需求，不接受任意 URL 下载。 */

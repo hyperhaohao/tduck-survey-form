@@ -223,7 +223,7 @@ public class DemandAccess {
             pendingArgs.toArray()));
     StringBuilder publicationUnread =
         new StringBuilder(
-            "SELECT COUNT(*) FROM rm_demand_publication p JOIN rm_demand d ON d.id=p.demand_id JOIN rm_demand_form f ON f.form_key=d.form_key LEFT JOIN rm_demand_read r ON r.object_type='PUBLICATION' AND r.object_id=p.id AND r.user_id=? WHERE p.published=TRUE AND p.version>COALESCE(r.seen_version,0) AND (f.visibility='LOGIN'");
+            "SELECT COUNT(*) FROM rm_demand_publication p JOIN rm_demand d ON d.id=p.demand_id JOIN rm_demand_form f ON f.form_key=d.form_key JOIN fm_user_form u ON u.form_key=d.form_key AND u.is_deleted=FALSE LEFT JOIN rm_demand_read r ON r.object_type='PUBLICATION' AND r.object_id=p.id AND r.user_id=? WHERE p.published=TRUE AND p.deleted_at IS NULL AND p.archived_at IS NULL AND p.version>COALESCE(r.seen_version,0) AND (f.visibility='LOGIN'");
     List<Object> publicationArgs = new ArrayList<>();
     publicationArgs.add(userId);
     if (!global && !grants.allForms().isEmpty()) {

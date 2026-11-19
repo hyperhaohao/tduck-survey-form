@@ -1,0 +1,86 @@
+# 237 瑞玛问卷新环境部署说明
+
+**2026-11-16 已在 237（`ai-server`）部署独立实例，240 测试实例保留。** 内网入口 `http://192.168.1.237:18000`；外网分享计划使用 `http://wanghao.yun:93`，由路由器将公网端口 93 映射到 `192.168.1.237:18000`（映射待用户完成）。
+
+## 一、运行架构
+
+- Compose：`/data/apps/ruima-survey/compose.yaml`，项目名 `ruima-survey`。
+- 容器：`ruima-survey-app-1`、`ruima-survey-db-1`；应用仅绑定 `127.0.0.1:18001:8999`，MySQL 不发布主机端口。
+- 数据：`/data/appdata/ruima-survey/{mysql,upload,logs}`；静态页面 `/www/wwwroot/ruima-survey`。
+- 受限配置：`/data/apps/ruima-survey/secrets`（root 0700）；MySQL 密码文件 999:999 0400，应用配置与维护账号 root 0600。
+- Nginx：`/www/server/panel/vhost/nginx/ruima-survey.conf`，监听 18000，SPA 回退；`/ai/` 关闭缓冲；API 反代到 `127.0.0.1:18001`。
+- UFW：新增 `18000/tcp ALLOW Anywhere`；未改其他规则。
+- 资源：app 1.5 CPU / 1400MiB，db 0.75 CPU / 512MiB；不影响 237 其他 8 个 Compose 项目。
+
+## 二、数据迁移
+
+- 从 240 `ruima_survey` 数据库迁移：6 个表单（其中 2 个已删除、2 个活跃收集单）、2 条需求、3 份答卷、0 个附件；迁移后计数一致。
+- `sys_env_config` 更新：`fileEnvConfig.domain=http://wanghao.yun:93/u`、`systemInfoConfig.webBaseUrl=http://wanghao.yun:93`；`jwtEnvConfig` 已生成 237 独立新密钥；`deepSeekEnvConfig` 随库迁移，AI 仍指向 236 的 New API 网关。
+- 迁移转储含 AI Key 与密码哈希，仅在受限目录临时保存，导入后已删除；未写入普通目录或 Git。
+- `rm_demand_identity` 的 issuer 仍为 `http://192.168.1.237:13004`，`ruima-admin` 到本地 `ac_user.id=1` 的映射继续有效。
+
+## 三、Casdoor
+
+- 新建独立应用 `admin/app-ruima-survey-237`，组织 `ruima`，未修改 240 的 `app-ruima-survey`。
+- 回调：`http://wanghao.yun:93/auth/oidc/callback`（主）、`http://192.168.1.237:18000/auth/oidc/callback`（内网备用）。
+- 应用配置：issuer `http://192.168.1.237:13004`，authorization endpoint `http://wanghao.yun:9999/login/oauth/authorize`，`redirect-uri` 与 `frontend-base` 为公网地址。
+- 内网临时切换到内网回调后，真实浏览器 Casdoor 登录成功（`ruima-admin` → 维护管理员，后台管理菜单可见）；随后已切回公网回调。
+
+## 四、验证记录
+
+- 应用健康 `healthy`；`/`、`/demand/admin`、`/demand/mine`、`/project/my`、`/login/entry` 均 200。
+- 维护账号本地登录成功；`capabilities` 返回 `admin/global/handle/manage=true`；后台收集单列表 4 个活跃表单（另 2 个为已删除）。
+- `/ai/status` 已配置，`/ai/test-connection` 成功 743ms。
+- 真实 Casdoor 浏览器登录：内网回调完成，落在 `/demand/home`，`localStorage.token` 存在，页面显示“维护管理员”和后台管理菜单；页面错误与失败请求为 0。
+- 公网 OIDC 启动 URL 已核对：redirect_uri 为 `http://wanghao.yun:93/auth/oidc/callback`，client_id 存在。
+- 删除/回收站：合成收集单提交 1 条需求后删除，回收站显示需求 1/答卷 1，彻底删除被拒，数据保留，恢复成功；按精确 `form_key` 清理后剩余 0 行。
+- 其他 237 服务保持运行：casdoor 200、outline 200，8 个原有 Compose 项目未重启；`nginx -t` 通过。
+- 镜像 `sha256:13a0f3c618dc68bcdd1e60a143832bed13e870d7b316847ad397f91ca751b02d`；静态 `index.html` SHA256 `7190d6b86907d238adc3f2a9ed26f02879f2c9af385962dbf034d22db580590f`（224 个文件）。
+- 外网 `http://wanghao.yun:93` 与 `http://58.56.114.138:93` 均 200；Casdoor 公网登录落在 `/demand/home`，后台管理 4 个活跃收集单；真实表单 `EpA5AG0f` 通过公网提交成功（需求编号 `REQ-20261116-821E5395`），按精确需求 ID 与数据 ID 清理后，237 数据恢复为 6 个表单、2 条需求、3 份答卷；页面错误与失败请求为 0。
+- 2026-11-18 前端静态更新：后台管理「原表单后台」仅全局管理员显示；151 个文件，`index.html` SHA256 `bab5b34e2ff5949b2a80273594b66dbca32488bdfe6dbd7c5483ee949f28db86`；`/`、`/demand/home`、`/demand/admin`、`/project/my`、`/login/entry` 均 200；备份 `/data/apps/ruima-survey/backups/static-20261118-063500-pre`；其他容器未重启。
+- 2026-11-18 需求模块 UI 统一静态更新：顶栏/侧栏/页面面板/筛选栏/表格/卡片对齐原系统；151 个文件，`index.html` SHA256 `8462e0a526c604b90238e38382871f0715b43c13b9b2fdb0579bbbbba1fb28e0`；`/`、`/demand/home`、`/demand/admin`、`/project/my`、`/login/entry` 均 200；备份 `/data/apps/ruima-survey/backups/static-20261118-082604-pre`；其他容器未重启。
+- 2026-11-18 成员与权限合并搜索框静态更新：一个输入框同时搜索部门与成员，选中即加入权限表；151 个文件，`index.html` SHA256 `0e210e450a789bd701c2d8ba70d4f1b0ff34d9983a1db6bcd11e847d171b8534`；`/`、`/demand/home`、`/demand/admin`、`/project/my`、`/login/entry` 均 200，线上 `index.html` 与本地哈希一致，新业务 chunk 返回 200；备份 `/data/apps/ruima-survey/backups/static-20261118-091106-pre`；其他容器未重启。
+- 2026-11-18 成员与权限部门树（前后端一起部署）：新增只读接口 `GET /demand-api/admin/departments/members`；后端 JAR SHA256 `0e96521f8d48686cc0bdbedfb75e2358860fd3964655d7b39e2c07a6f4d4619a`，应用镜像 `sha256:f295d41f71c23495af59a727bf92336429938b27dff36771d67fc85d6fb79aba`；旧 JAR 备份 `/data/apps/ruima-survey/build/application.jar.20261117`（`179e9c94…`），旧镜像标签 `ruima/survey:20261118-pre-tree`（`7908f77dff0e`）。app 容器重建后 `healthy`，`/demand-api/capabilities` 返回 `enabled:true`；`/`、`/demand/home`、`/demand/admin`、`/project/my`、`/login/entry` 均 200；新接口未登录返回 `code:401`（路由已注册，虚构路径为 404）。静态 151 个文件，`index.html` SHA256 `2e37daf86f59de5708ab5ad34f35dabc04d12a5486a2c8f388bdc68aa8859753`，线上哈希与本地一致；备份 `/data/apps/ruima-survey/backups/static-20261118-100220-pre`；MySQL 与其他 Compose 项目未重启。
+- 2026-11-18 卡片标题填报、组织架构维护与填报人部门（前后端一起部署）：新增部门/成员 CRUD、`PUT /admin/users/{userId}/departments`、`POST /admin/forms/{key}/dept-field`；后端 69 项隔离测试、前端 48 项页面回归通过；应用镜像 `sha256:8cbcef3a1c3f4c9c6579fe212495fb7c4ab0c352cb16b61af9e7fb4e7baa7f3e`，JAR SHA256 `dfcebb9a0149c37bb3fe5bae2a009af3bf09682d9ac07155c9de9e1b8a9030df`，旧 JAR 备份 `application.jar.20261118-pre-org`（`0e96521f…`），旧镜像 `ruima/survey:20261118-pre-org`（`f295d41f…`）；app 容器重建后 `healthy`，页面 200，新增部门与补题接口未登录返回 `code:401`、虚构路径 404。静态 151 个文件，`index.html` SHA256 `93b6b12f139256edf2c39c557b1fb9199c5deb834b30022c03394ce95c3b2419`，备份 `/data/apps/ruima-survey/backups/static-20261118-111557-pre`；MySQL 与其他 Compose 项目未重启。
+- 2026-11-19 需求详情标签与部门题补题（前后端一起部署）：详情按表单字段顺序显示中文标签与选项文字；`DemandFormFields.persistDepartmentField` 在首次填写/新建收集单时落库，`migration-20261119-dept-field.sql` 回填存量。后端 69 项、前端 49 项回归通过；应用镜像 `sha256:7b40d52c51b6eee42d0d27d72c3f43bcdd05e426648cb900c6ed05c570055778`，JAR SHA256 `662c700c5c17bc5158fa9ce275195d3fb782e2795eaa7f5dad509ea975a956a0`，旧镜像 `ruima/survey:20261118-pre-org`（`8cbcef3a…`）；app `healthy`，`/`、`/demand/mine`、`/demand/pending`、`/demand/publications`、`/demand/admin`、`/project/my`、`/login/entry` 均 200。回填前仅 `D5zmF3Hq` 缺部门题，回填后 4 个活跃收集单各 1 条；详情接口返回 `demandDeptlabel` / 填报人部门，`/s/D5zmF3Hq` 部门题 `disabled=true` 且含“无”选项；1024×768 真实浏览器核对详情首行「填报人部门 瑞玛电气 / 技术中心」、优先级中文选项与填报页只读部门题通过，页面错误与失败请求为 0。静态 151 个文件，`index.html` SHA256 `d6b7032a7caa51de70e74deeb64500532c07b60b6670bf676776f87167898ea2`，备份 `/data/apps/ruima-survey/backups/deptfix-20261119-pre`（含 `fm_user_form_item`/`rm_demand_form` 转储、旧 JAR 与旧静态包）；MySQL 与其他 Compose 项目未重启。
+- 2026-11-19 公示归档/删除与测试表单彻底删除（前后端一起部署）：`rm_demand_publication` 新增 `archived_at/archived_by/deleted_at/deleted_by`，新增 `migration-20261119-publication-state.sql`；新增 `/demand-api/publications/{id}/archive|delete`（仅单据管理员或全局管理员），公示列表/详情/未读/导出过滤已归档、已删除和已删除收集单。后端 70 项、前端 52 项回归通过；应用镜像 `sha256:00e65ed02b9fbf071a8db53073c08343ff70ff2335bfe297b06105b581bf0578`，JAR SHA256 `866422488cd74196e7823709bced9ddb88396556a96093b1408c0bf9bed11653`，旧镜像 `ruima/survey:20261118-pre-org`（`7b40d52c…`）；app `healthy`，7 个页面均 200，迁移已执行，`/demand-api/publications` 返回 0 条、`publicationUnread=0`，归档/删除路由对虚构 ID 返回 404（路由已注册），其他容器未重启。静态 151 个文件，`index.html` SHA256 `82aeccbac98d208221b6bb2fdba6bf47449893277d97243075d94edccb72350c`，备份 `/data/apps/ruima-survey/backups/publication-state-20261119-pre`（含 `rm_demand_publication`/`rm_demand_form` 转储、旧 JAR 与旧静态包）。随后按精确 `form_key='EpA5AG0f'` 彻底删除「需求征集（测试）」：2 条需求、2 份答卷、3 个题目、2 条消息、2 条已读、2 条 ACL、1 条公示和 1 条收集配置全部清零，其他收集单计数不变；备份 `/data/apps/ruima-survey/backups/testform-purge-20261119-pre`（`42a58e40…`），报告 `reports/testform-purge-20261119.json`；回收站接口不再返回该表单。1440×900 与 1024×768 真实浏览器实测三张主表需求列 360px / 178px / 218px、无内部横向滚动，公示页为空，页面错误与失败请求为 0。
+- 2026-11-19 填报者追问与详情体验（前后端一起部署）：`rm_demand` 新增 `followup_at`，新增 `POST /demand-api/requests/{id}/followup`（登录填报者本人、非匿名、收集单未删除）；追问写入 `FOLLOWUP`，进入经办人/单据管理员待办，只有正式回复清除；详情空状态与操作行右对齐上线。后端 75 项、前端 57 项回归通过；应用镜像 `sha256:9bd25ac3960d4cc1f1b7c560ebba0c91f9474114b53bc1e80e3bc5e9752417e7`，JAR SHA256 `1f2046cb203005075ed6013184499739c5b8a241e712b7466592d69565f77b0c`，旧镜像 `ruima/survey:20261118-pre-org`（`00e65ed0…`）；app `healthy`，7 个页面均 200，迁移已执行，维护账号对他人需求 `canFollowUp=false`、`followupPending=false`，虚构需求追问路由返回 403，现有 `followup_at` 全为空，其他容器未重启。静态 151 个文件，`index.html` SHA256 `8c2877095ab6ef4773c4e281bbf14f542fbe9da4f5d49a74dc0d656976f74048`，备份 `/data/apps/ruima-survey/backups/followup-20261119-pre`。合成需求线上验收：追问后本人/staff 可见 `FOLLOWUP`、`followupPending=true`、管理总表行带追问标记；正式回复后 `followup_at` 清空、`followupPending=false`、填报者未读 +1；1024/1440 浏览器完成追问提交、staff 提示、回复清除、内部备注/操作记录空状态与 5 个操作行右对齐（均为 24px 边距），页面错误与失败请求为 0；合成需求、消息和答卷已按精确 ID 清理，剩余真实需求 1 条、消息 3 条，其他数据不变。
+
+## 五、外网映射与验证（2026-11-16 已完成）
+
+1. 路由器已将公网端口 93 转发到 `192.168.1.237:18000`（TCP）。
+2. 外网 `http://wanghao.yun:93` 与 `http://58.56.114.138:93` 均返回 200。
+3. Casdoor 公网登录完整回调到 `http://wanghao.yun:93/auth/oidc/callback`，`ruima-admin` 登录后进入 `/demand/home`，后台管理可见 4 个活跃收集单。
+4. 公网打开真实表单 `/s/EpA5AG0f`，填写标题与说明后提交成功，返回需求编号 `REQ-20261116-821E5395`；合成需求与答卷已按精确 ID 清理，未残留。
+5. 当前为 HTTP 明文；后续建议补 HTTPS 证书。若运营商或浏览器拦截低端口 93，改用其他公网端口，并同时更新 `fileEnvConfig.domain`、`application-test.yml` 的 `redirect-uri/frontend-base`、Casdoor 应用回调。
+
+## 六、维护命令
+
+```bash
+cd /data/apps/ruima-survey
+sudo docker compose ps
+sudo docker compose logs -f app
+sudo docker compose restart app
+sudo docker compose down
+sudo nginx -t && sudo nginx -s reload
+```
+
+## 七、回退
+
+- 240 不受影响，可继续作为回退环境。
+- 237 回退：`sudo docker compose -f /data/apps/ruima-survey/compose.yaml down`；删除 `ruima-survey.conf`；删除 UFW 18000 规则；恢复 `backups/nginx-pre` 中的 Nginx 配置并 reload；数据目录保留排查。
+- 新项目为独立数据库与目录，回退不涉及 240。
+
+## 八、用户同步（默认全量创建）
+
+- 登录流程：员工首次 Casdoor 登录时才创建本地 `ac_user` 和 `rm_demand_identity`；成员权限搜索只查本地 `ac_user`，未登录员工原本不可选。
+- 2026-11-16 已执行全量同步：Casdoor 组织 `ruima` 共 104 个活跃用户，新建 100 个本地账户、保留 4 个已有账户，身份映射 104 条；成员权限选择器现在返回 104 人。
+- 同步脚本：`/data/apps/ruima-survey/scripts/sync-casdoor-users.py`，幂等；再次执行返回 `created=0, skipped=104`。一次性名称修复：`repair-synced-user-names.py`（首次同步因 psql 输出按本地编码解码导致中文双编码，已修复为 UTF-8；100 个名称已校正）。
+- 手动同步：`sudo /usr/bin/python3 /data/apps/ruima-survey/scripts/sync-casdoor-users.py`。
+- 每日同步已安装：`/etc/cron.d/ruima-survey-user-sync`，以 root 运行，`flock` 防止重叠；主机时区为 UTC，`19:17 UTC` = 次日 `03:17 Asia/Shanghai`。日志 `/data/appdata/ruima-survey/logs/casdoor-user-sync.log`（root 0600，仅计数，无凭据）。
+  ```cron
+  17 19 * * * root flock -n /run/ruima-survey-user-sync.lock /usr/bin/python3 /data/apps/ruima-survey/scripts/sync-casdoor-users.py >> /data/appdata/ruima-survey/logs/casdoor-user-sync.log 2>&1
+  ```
+- 手工执行同一条命令已验证：`created=0, skipped=104`，104 个身份映射保持不变。
+- 未登录员工首次 Casdoor 登录仍会自动创建；新员工如需提前出现在成员列表，等待每日同步或在需要时手动执行脚本。
+- 同步只创建普通本地账户，不授予后台管理员、单据管理员或任何收集单权限；权限仍由「后台管理员授权」和「成员权限」单独配置。

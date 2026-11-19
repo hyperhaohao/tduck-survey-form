@@ -14,6 +14,7 @@ import org.springframework.transaction.annotation.Transactional;
 public class DemandForms {
   private final DemandStore store;
   private final DemandAccess access;
+  private final DemandFormFields formFields;
   /** 查询当前身份可见的收集单，管理查询不公开名单。 */
   public List<Map<String, Object>> list(Long userId, boolean management) {
     access.requireEnabled();
@@ -119,6 +120,7 @@ public class DemandForms {
           anonymous,
           flag(body.get("published")),
           endTime);
+      formFields.persistDepartmentField(key);
       grantCreatorManager(key);
     } else {
       long revision = Long.parseLong(String.valueOf(body.getOrDefault("revision", -1)));

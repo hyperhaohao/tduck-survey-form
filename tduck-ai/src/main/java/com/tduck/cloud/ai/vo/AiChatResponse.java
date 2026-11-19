@@ -51,6 +51,11 @@ public class AiChatResponse {
      */
     private List<Choice> choices;
 
+    /**
+     * 上游错误信息（hutool 在失败时会回调 {"error": "..."}）
+     */
+    private Object error;
+
     public static AiChatResponse build(String chunk) {
         if (StrUtil.isNotBlank(chunk)) {
             // 处理 SSE 格式：去掉 "data: " 前缀
@@ -104,6 +109,12 @@ public class AiChatResponse {
          * 内容
          */
         private String content;
+
+        /**
+         * 思考过程（DeepSeek V4 / reasoner 流式返回）
+         */
+        @JsonProperty("reasoning_content")
+        private String reasoningContent;
 
         /**
          * 角色

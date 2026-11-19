@@ -88,7 +88,7 @@ public class DemandExport {
       String keyword,
       String submitStart,
       String submitEnd) {
-    List<Map<String, Object>> all = workflow.publications(userId);
+    List<Map<String, Object>> all = workflow.publications(userId, false);
     String q = keyword == null ? "" : keyword;
     List<Map<String, Object>> matched = new ArrayList<>();
     for (Map<String, Object> row : all) {
