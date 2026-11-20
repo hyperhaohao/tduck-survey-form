@@ -24,7 +24,7 @@ public class DemandWorkflow {
   private static final String FROM =
       " FROM rm_demand d JOIN fm_user_form f ON f.form_key=d.form_key";
   private static final String ROW_SELECT =
-      "SELECT d.id,d.form_key,d.request_no,d.title,d.submitter_name,d.submitted_by,d.handler_id,d.decision,d.progress,d.reason,d.completion,d.create_time,d.update_time,d.public_version,d.publication_skipped,d.followup_at AS followup_at,d.revision,c.collect_only,f.name AS form_name,h.name AS handler_name,pub.published AS publication_published,pub.archived_at AS publication_archived_at,pub.deleted_at AS publication_deleted_at,pub.version AS publication_version,(SELECT MAX(m.create_time) FROM rm_demand_message m WHERE m.demand_id=d.id AND m.kind='REPLY') AS reply_time,CASE WHEN d.public_version>COALESCE(r.seen_version,1) THEN TRUE ELSE FALSE END AS unread"
+      "SELECT d.id,d.form_key,d.request_no,d.title,d.submitter_name,d.submitted_by,d.handler_id,d.decision,d.progress,d.reason,d.completion,d.create_time,d.update_time,d.public_version,d.publication_skipped,d.followup_at AS followup_at,d.revision,c.collect_only,f.name AS form_name,h.name AS handler_name,pub.published AS publication_published,pub.archived_at AS publication_archived_at,pub.deleted_at AS publication_deleted_at,pub.version AS publication_version,(SELECT MAX(m.create_time) FROM rm_demand_message m WHERE m.demand_id=d.id AND m.kind='REPLY') AS reply_time,CASE WHEN c.collect_only=TRUE THEN CASE WHEN r.seen_version IS NULL OR r.seen_version<d.public_version THEN TRUE ELSE FALSE END ELSE d.public_version>COALESCE(r.seen_version,1) END AS unread"
           + FROM
           + " LEFT JOIN rm_demand_form c ON c.form_key=d.form_key LEFT JOIN ac_user h ON h.id=d.handler_id LEFT JOIN rm_demand_publication pub ON pub.demand_id=d.id LEFT JOIN rm_demand_read r ON r.object_type='DEMAND' AND r.object_id=d.id AND r.user_id=?";
   /** 分页查询，按权限过滤后再统计数量。 */
@@ -56,7 +56,7 @@ public class DemandWorkflow {
         store.rows(
             ROW_SELECT + query.where + " ORDER BY d.create_time DESC,d.id LIMIT ? OFFSET ?",
             rowArgs.toArray());
-    decorate(rows, userId);
+    decorate(rows, userId, scope);
     Map<String, Object> result = new LinkedHashMap<>();
     result.put("rows", rows);
     result.put("total", total);
@@ -88,11 +88,51 @@ public class DemandWorkflow {
             rowArgs.toArray());
     boolean truncated = rows.size() > maxRows;
     if (truncated) rows = new ArrayList<>(rows.subList(0, maxRows));
-    decorate(rows, userId);
+    decorate(rows, userId, scope);
     Map<String, Object> result = new LinkedHashMap<>();
     result.put("rows", rows);
     result.put("truncated", truncated);
     return result;
+  }
+  /** 导出时批量读取原表单答案与部门快照，避免列表接口返回原始答案。 */
+  public Map<String, Map<String, Object>> exportAnswers(List<String> demandIds) {
+    Map<String, Map<String, Object>> result = new LinkedHashMap<>();
+    if (demandIds == null || demandIds.isEmpty()) return result;
+    List<String> ids = new ArrayList<>(new LinkedHashSet<>(demandIds));
+    for (int start = 0; start < ids.size(); start += 500) {
+      List<String> chunk = ids.subList(start, Math.min(ids.size(), start + 500));
+      StringBuilder sql =
+          new StringBuilder(
+              "SELECT d.id,d.department,d.anonymous,x.original_data FROM rm_demand d "
+                  + "LEFT JOIN fm_user_form_data x ON x.id=CAST(d.data_id AS DECIMAL(20,0)) WHERE d.id IN (");
+      List<Object> args = new ArrayList<>();
+      for (int i = 0; i < chunk.size(); i++) {
+        if (i > 0) sql.append(',');
+        sql.append('?');
+        args.add(chunk.get(i));
+      }
+      sql.append(')');
+      for (Map<String, Object> row : store.rows(sql.toString(), args.toArray())) {
+        Map<String, Object> original;
+        try {
+          original = store.json(row.get("originalData"));
+        } catch (Exception error) {
+          log.warn("导出答案解析失败 demandId={}", row.get("id"));
+          original = new LinkedHashMap<>();
+        }
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("originalData", original);
+        data.put(
+            "department",
+            formFields.resolve(row.get("department"), original, flag(row.get("anonymous"))));
+        result.put(String.valueOf(row.get("id")), data);
+      }
+    }
+    return result;
+  }
+  /** 导出使用的表单字段元数据。 */
+  public List<FormFieldVO> formFields(String formKey) {
+    return fields.listFormFields(formKey);
   }
   /** 列表与导出共用的查询条件。 */
   private Query query(
@@ -145,14 +185,16 @@ public class DemandWorkflow {
     }
   }
   /** 为每行补充当前账户的处理能力，避免前端逐行判断。 */
-  private void decorate(List<Map<String, Object>> rows, Long userId) {
+  private void decorate(List<Map<String, Object>> rows, Long userId, String scope) {
     if (rows.isEmpty()) return;
     boolean global = access.globalAdmin(userId);
     DemandGrants grants = access.effectiveGrants(userId);
     for (Map<String, Object> row : rows) {
       String key = String.valueOf(row.get("formKey"));
       boolean collectOnly = flag(row.get("collectOnly"));
+      boolean staff = global || grants.canHandle(key) || grants.canManage(key);
       row.put("collectOnly", collectOnly);
+      if (collectOnly && ("mine".equals(scope) || !staff)) row.put("unread", false);
       row.put("canHandle", !collectOnly && grants.canHandle(key));
       row.put("canManage", global || grants.canManage(key));
       row.put("followupPending", !collectOnly && row.remove("followupAt") != null);
@@ -189,10 +231,15 @@ public class DemandWorkflow {
     else
       pendingExpression =
           "SUM(CASE WHEN c.collect_only=TRUE THEN CASE WHEN d.public_version>COALESCE(r.seen_version,1) THEN 1 ELSE 0 END ELSE CASE WHEN (d.decision<>'REJECTED' AND d.progress<>'COMPLETED') OR d.followup_at IS NOT NULL THEN 1 ELSE 0 END END)";
+    String unreadExpression =
+        "mine".equals(scope)
+            ? "SUM(CASE WHEN d.public_version>COALESCE(r.seen_version,1) THEN 1 ELSE 0 END)"
+            : "SUM(CASE WHEN c.collect_only=TRUE THEN CASE WHEN r.seen_version IS NULL OR r.seen_version<d.public_version THEN 1 ELSE 0 END ELSE CASE WHEN d.public_version>COALESCE(r.seen_version,1) THEN 1 ELSE 0 END END)";
     List<Map<String, Object>> rows =
         store.rows(
             "SELECT d.form_key,f.name AS form_name,COUNT(*) AS total,"
-                + "SUM(CASE WHEN d.public_version>COALESCE(r.seen_version,1) THEN 1 ELSE 0 END) AS unread,"
+                + unreadExpression
+                + " AS unread,"
                 + "MAX(CASE WHEN c.collect_only=TRUE THEN 1 ELSE 0 END) AS collect_only,"
                 + pendingExpression
                 + " AS pending,"

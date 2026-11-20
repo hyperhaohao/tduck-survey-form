@@ -40,6 +40,7 @@ class DemandWorkflowTest {
   DemandSubmission submission;
   DemandProperties properties;
   UserService users;
+  UserFormItemService fields;
   TransactionTemplate tx;
 
   @BeforeEach
@@ -95,8 +96,9 @@ class DemandWorkflowTest {
     departments = new DemandDepartments(store, access);
     UserFormItemService fields = mock(UserFormItemService.class);
     when(fields.listFormFields(anyString())).thenReturn(Collections.emptyList());
+    this.fields = fields;
     workflow = new DemandWorkflow(store, access, fields, formFields);
-    export = new DemandExport(workflow);
+    export = new DemandExport(workflow, formFields);
     submission = new DemandSubmission(store, access, formFields);
     tx = new TransactionTemplate(new DataSourceTransactionManager(ds));
   }
@@ -164,6 +166,14 @@ class DemandWorkflowTest {
     if (row == null) return "";
     Cell cell = row.getCell(column);
     return cell == null ? "" : cell.getStringCellValue();
+  }
+
+  private int header(Sheet sheet, String label) {
+    Row row = sheet.getRow(0);
+    if (row == null) return -1;
+    for (int i = 0; i < row.getLastCellNum(); i++)
+      if (label.equals(cell(sheet, 0, i))) return i;
+    return -1;
   }
 
   private int rowCount(DemandExport.ExportFile file) throws Exception {
@@ -739,14 +749,25 @@ class DemandWorkflowTest {
     try (XSSFWorkbook workbook = book(file)) {
       Sheet sheet = workbook.getSheetAt(0);
       assertEquals(1, sheet.getLastRowNum());
-      assertEquals("需求标题", cell(sheet, 0, 0));
-      assertEquals("需求征集", cell(sheet, 1, 2));
-      assertEquals("人员10", cell(sheet, 1, 3));
-      assertEquals("人员30", cell(sheet, 1, 4));
-      assertEquals("采纳", cell(sheet, 1, 5));
-      assertEquals("待实施", cell(sheet, 1, 6));
+      assertEquals("提报时间", cell(sheet, 0, 0));
+      assertEquals("收集单", cell(sheet, 0, 1));
+      assertEquals("填报者", cell(sheet, 0, 2));
+      assertEquals("填报人部门", cell(sheet, 0, 3));
+      int last = sheet.getRow(0).getLastCellNum() - 1;
+      assertEquals("需求编号", cell(sheet, 0, last - 5));
+      assertEquals("需求标题", cell(sheet, 0, last - 4));
+      assertEquals("经办人", cell(sheet, 0, last - 3));
+      assertEquals("采纳结果", cell(sheet, 0, last - 2));
+      assertEquals("实施进度", cell(sheet, 0, last - 1));
+      assertEquals("回复时间", cell(sheet, 0, last));
+      assertEquals("需求征集", cell(sheet, 1, header(sheet, "收集单")));
+      assertEquals("人员10", cell(sheet, 1, header(sheet, "填报者")));
+      assertEquals("人员30", cell(sheet, 1, header(sheet, "经办人")));
+      assertEquals("采纳", cell(sheet, 1, header(sheet, "采纳结果")));
+      assertEquals("待实施", cell(sheet, 1, header(sheet, "实施进度")));
       for (int i = 0; i <= sheet.getLastRowNum(); i++)
-        for (int j = 0; j < 9; j++) assertNotEquals("内部备注不可导出", cell(sheet, i, j));
+        for (int j = 0; j < sheet.getRow(0).getLastCellNum(); j++)
+          assertNotEquals("内部备注不可导出", cell(sheet, i, j));
     }
     assertEquals(1, rowCount(export.requests(10L, "mine", "", "", "", "", "", "", "")));
     assertEquals(0, rowCount(export.requests(20L, "mine", "", "", "", "", "", "", "")));
@@ -756,6 +777,94 @@ class DemandWorkflowTest {
         workflow.exportRows(30L, "table", "", "", "", "", "", "", "", 1);
     assertEquals(true, limited.get("truncated"));
     assertEquals(1, ((List<?>) limited.get("rows")).size());
+  }
+
+  @Test
+  void exportRequestsIncludeFormAnswers() throws Exception {
+    jdbc.update("INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(10,'D1')");
+    create(100, 10L, false);
+    jdbc.update(
+        "UPDATE fm_user_form_data SET original_data=? WHERE id=100",
+        "{\"title\":\"改进建议\",\"radio1795065047272\":1,"
+            + "\"radio1795065047272label\":\"高\","
+            + "\"attachment\":[{\"name\":\"附件.pdf\",\"url\":\"http://storage.test/u/A/file.pdf\"}],"
+            + "\"legacyField\":\"旧值\"}");
+    Map<String, Object> radioScheme =
+        body(
+            "typeId",
+            "RADIO",
+            "config",
+            body(
+                "options",
+                Arrays.asList(
+                    body("label", "高", "value", 1), body("label", "低", "value", 0))));
+    when(fields.listFormFields("A"))
+        .thenReturn(
+            Arrays.asList(
+                new FormFieldVO("title", "需求标题", "TEXT", null),
+                new FormFieldVO("radio1795065047272label", "优先级", "RADIO", radioScheme),
+                new FormFieldVO("attachment", "附件", "UPLOAD", null)));
+    DemandExport.ExportFile file =
+        export.requests(50L, "table", "", "", "", "A", "", "", "");
+    try (XSSFWorkbook workbook = book(file)) {
+      Sheet sheet = workbook.getSheetAt(0);
+      int dept = header(sheet, "填报人部门");
+      int title = header(sheet, "填报-需求标题");
+      int radio = header(sheet, "填报-优先级");
+      int attachment = header(sheet, "填报-附件");
+      int other = header(sheet, "其他填报内容");
+      int last = sheet.getRow(0).getLastCellNum() - 1;
+      assertEquals("提报时间", cell(sheet, 0, 0));
+      assertEquals("收集单", cell(sheet, 0, 1));
+      assertEquals("填报者", cell(sheet, 0, 2));
+      assertEquals("填报人部门", cell(sheet, 0, 3));
+      assertEquals("需求编号", cell(sheet, 0, last - 5));
+      assertEquals("需求标题", cell(sheet, 0, last - 4));
+      assertEquals("经办人", cell(sheet, 0, last - 3));
+      assertEquals("采纳结果", cell(sheet, 0, last - 2));
+      assertEquals("实施进度", cell(sheet, 0, last - 1));
+      assertEquals("回复时间", cell(sheet, 0, last));
+      assertTrue(header(sheet, "填报者") < dept);
+      assertTrue(dept < title);
+      assertTrue(other < header(sheet, "需求编号"));
+      assertTrue(dept >= 0 && title >= 0 && radio >= 0 && attachment >= 0 && other >= 0);
+      assertEquals("总部 / 技术部", cell(sheet, 1, dept));
+      assertEquals("改进建议", cell(sheet, 1, title));
+      assertEquals("高", cell(sheet, 1, radio));
+      assertTrue(cell(sheet, 1, attachment).contains("附件.pdf"));
+      assertTrue(cell(sheet, 1, attachment).contains("http://storage.test/u/A/file.pdf"));
+      assertTrue(cell(sheet, 1, other).contains("legacyField"));
+      assertTrue(cell(sheet, 1, other).contains("旧值"));
+    }
+  }
+
+  @Test
+  void exportWithoutFormKeyUsesContentText() throws Exception {
+    create(100, 10L, false);
+    when(fields.listFormFields("A"))
+        .thenReturn(
+            Collections.singletonList(new FormFieldVO("title", "需求标题", "TEXT", null)));
+    DemandExport.ExportFile file =
+        export.requests(50L, "table", "", "", "", "", "", "", "");
+    try (XSSFWorkbook workbook = book(file)) {
+      Sheet sheet = workbook.getSheetAt(0);
+      int content = header(sheet, "填报内容");
+      int last = sheet.getRow(0).getLastCellNum() - 1;
+      assertEquals(-1, header(sheet, "填报-需求标题"));
+      assertEquals("提报时间", cell(sheet, 0, 0));
+      assertEquals("收集单", cell(sheet, 0, 1));
+      assertEquals("填报者", cell(sheet, 0, 2));
+      assertEquals("填报人部门", cell(sheet, 0, 3));
+      assertEquals("填报内容", cell(sheet, 0, 4));
+      assertEquals("需求编号", cell(sheet, 0, last - 5));
+      assertEquals("需求标题", cell(sheet, 0, last - 4));
+      assertEquals("经办人", cell(sheet, 0, last - 3));
+      assertEquals("采纳结果", cell(sheet, 0, last - 2));
+      assertEquals("实施进度", cell(sheet, 0, last - 1));
+      assertEquals("回复时间", cell(sheet, 0, last));
+      assertTrue(content >= 0);
+      assertTrue(cell(sheet, 1, content).contains("需求标题：改进建议"));
+    }
   }
 
   @Test
@@ -1306,6 +1415,7 @@ class DemandWorkflowTest {
   }
 
   @Test
+  @SuppressWarnings("unchecked")
   void collectOnlyUnreadPendingClearsPerReader() {
     jdbc.update("UPDATE rm_demand_form SET collect_only=TRUE WHERE form_key='A'");
     String id = create(100, 10L, false);
@@ -1318,7 +1428,12 @@ class DemandWorkflowTest {
     assertEquals(1L, access.capabilities(1L).get("pending"));
     assertEquals(
         1L, workflow.list(50L, "pending", "", "", "", "", "", "", "", 1, 20).get("total"));
+    List<Map<String, Object>> pendingRows =
+        (List<Map<String, Object>>)
+            workflow.list(50L, "pending", "", "", "", "", "", "", "", 1, 20).get("rows");
+    assertEquals(Boolean.TRUE, pendingRows.get(0).get("unread"));
     assertEquals(1, workflow.summary(50L, "pending").size());
+    assertEquals(1L, number(workflow.summary(50L, "pending").get(0).get("unread")));
 
     workflow.read("DEMAND", id, version, 50L);
     assertEquals(0L, access.capabilities(50L).get("pending"));

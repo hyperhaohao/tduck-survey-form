@@ -3,6 +3,7 @@ package com.tduck.cloud.api.demand;
 import static com.tduck.cloud.api.demand.DemandStore.*;
 
 import com.tduck.cloud.common.exception.BaseException;
+import com.tduck.cloud.form.vo.FormFieldVO;
 import java.io.ByteArrayOutputStream;
 import java.text.SimpleDateFormat;
 import java.util.*;
@@ -19,6 +20,7 @@ public class DemandExport {
   public static final int MAX_ROWS = 10000;
 
   private final DemandWorkflow workflow;
+  private final DemandFormFields formFields;
 
   /** 导出结果与是否发生截断。 */
   public static class ExportFile {
@@ -31,7 +33,7 @@ public class DemandExport {
     }
   }
 
-  /** 导出当前筛选条件下的需求列表。 */
+  /** 导出当前筛选条件下的需求列表；单收集单展开题目，跨收集单追加填报内容文本。 */
   public ExportFile requests(
       Long userId,
       String scope,
@@ -57,27 +59,75 @@ public class DemandExport {
     @SuppressWarnings("unchecked")
     List<Map<String, Object>> rows = (List<Map<String, Object>>) data.get("rows");
     boolean truncated = Boolean.TRUE.equals(data.get("truncated"));
-    String[] headers = {
-      "需求标题", "需求编号", "收集单", "填报者", "经办人", "采纳结果", "实施进度", "提报时间", "回复时间"
-    };
-    int[] widths = {42, 22, 26, 14, 14, 10, 10, 20, 20};
+    boolean single = formKey != null && !formKey.isEmpty();
+    List<FormFieldVO> answerFields = new ArrayList<>();
+    if (single) {
+      answerFields.addAll(workflow.formFields(formKey));
+      answerFields.removeIf(formFields::isDepartmentField);
+    }
+    List<String> ids = new ArrayList<>();
+    for (Map<String, Object> row : rows) ids.add(str(row.get("id")));
+    Map<String, Map<String, Object>> answers = workflow.exportAnswers(ids);
+    List<String> headerList =
+        new ArrayList<>(Arrays.asList("提报时间", "收集单", "填报者", "填报人部门"));
+    List<Integer> widthList = new ArrayList<>(Arrays.asList(20, 26, 14, 16));
+    if (single) {
+      for (FormFieldVO field : answerFields) {
+        headerList.add("填报-" + str(field.getLabel()));
+        widthList.add(20);
+      }
+      headerList.add("其他填报内容");
+      widthList.add(40);
+    } else {
+      headerList.add("填报内容");
+      widthList.add(60);
+    }
+    headerList.addAll(
+        Arrays.asList("需求编号", "需求标题", "经办人", "采纳结果", "实施进度", "回复时间"));
+    widthList.addAll(Arrays.asList(22, 42, 14, 10, 10, 20));
+    int[] widths = new int[widthList.size()];
+    for (int i = 0; i < widths.length; i++) widths[i] = widthList.get(i);
+    Map<String, List<FormFieldVO>> fieldCache = new LinkedHashMap<>();
     return build(
         "需求列表",
-        headers,
+        headerList.toArray(new String[0]),
         widths,
         rows,
-        row ->
-            new String[] {
-              str(row.get("title")),
-              str(row.get("requestNo")),
-              str(row.get("formName")),
-              str(row.get("submitterName")),
-              str(row.get("handlerName")),
-              decisionLabel(row.get("decision")),
-              progressLabel(row.get("progress")),
-              time(row.get("createTime")),
-              time(row.get("replyTime"))
-            },
+        row -> {
+          List<String> cells =
+              new ArrayList<>(
+                  Arrays.asList(
+                      time(row.get("createTime")),
+                      str(row.get("formName")),
+                      str(row.get("submitterName"))));
+          Map<String, Object> answer = answers.get(str(row.get("id")));
+          Map<String, Object> original =
+              answer == null ? Collections.emptyMap() : map(answer.get("originalData"));
+          cells.add(answer == null ? "" : join(answer.get("department")));
+          if (single) {
+            for (FormFieldVO field : answerFields)
+              cells.add(formFields.displayValue(field, original));
+            cells.add(formFields.otherText(answerFields, original));
+          } else {
+            String key = str(row.get("formKey"));
+            List<FormFieldVO> fields = fieldCache.get(key);
+            if (fields == null) {
+              fields = new ArrayList<>(workflow.formFields(key));
+              fields.removeIf(formFields::isDepartmentField);
+              fieldCache.put(key, fields);
+            }
+            cells.add(formFields.contentText(fields, original));
+          }
+          cells.addAll(
+              Arrays.asList(
+                  str(row.get("requestNo")),
+                  str(row.get("title")),
+                  str(row.get("handlerName")),
+                  decisionLabel(row.get("decision")),
+                  progressLabel(row.get("progress")),
+                  time(row.get("replyTime"))));
+          return cells.toArray(new String[0]);
+        },
         truncated);
   }
 
@@ -164,7 +214,7 @@ public class DemandExport {
         String[] values = writer.cells(row);
         Row line = sheet.createRow(index++);
         for (int i = 0; i < headers.length; i++)
-          line.createCell(i).setCellValue(i < values.length ? values[i] : "");
+          line.createCell(i).setCellValue(clip(i < values.length ? values[i] : ""));
       }
       sheet.createFreezePane(0, 1);
       ByteArrayOutputStream out = new ByteArrayOutputStream();
@@ -179,6 +229,28 @@ public class DemandExport {
 
   private static String str(Object value) {
     return value == null ? "" : value.toString();
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Map<String, Object> map(Object value) {
+    return value instanceof Map ? (Map<String, Object>) value : Collections.emptyMap();
+  }
+
+  private static String join(Object value) {
+    if (value instanceof Collection) {
+      List<String> parts = new ArrayList<>();
+      for (Object item : (Collection<?>) value) {
+        String text = str(item).trim();
+        if (!text.isEmpty()) parts.add(text);
+      }
+      return String.join("、", parts);
+    }
+    return str(value);
+  }
+
+  private static String clip(String value) {
+    if (value == null) return "";
+    return value.length() <= 32767 ? value : value.substring(0, 32767);
   }
 
   private static String time(Object value) {
