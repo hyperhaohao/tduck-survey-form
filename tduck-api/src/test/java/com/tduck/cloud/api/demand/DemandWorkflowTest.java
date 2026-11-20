@@ -1306,6 +1306,163 @@ class DemandWorkflowTest {
   }
 
   @Test
+  void collectOnlyUnreadPendingClearsPerReader() {
+    jdbc.update("UPDATE rm_demand_form SET collect_only=TRUE WHERE form_key='A'");
+    String id = create(100, 10L, false);
+    forms.member("A", 20L, body("canManage", true), 1L);
+    long version =
+        number(
+            store.one("SELECT public_version FROM rm_demand WHERE id=?", id).get("publicVersion"));
+    assertEquals(1L, access.capabilities(50L).get("pending"));
+    assertEquals(1L, access.capabilities(20L).get("pending"));
+    assertEquals(1L, access.capabilities(1L).get("pending"));
+    assertEquals(
+        1L, workflow.list(50L, "pending", "", "", "", "", "", "", "", 1, 20).get("total"));
+    assertEquals(1, workflow.summary(50L, "pending").size());
+
+    workflow.read("DEMAND", id, version, 50L);
+    assertEquals(0L, access.capabilities(50L).get("pending"));
+    assertEquals(
+        0L, workflow.list(50L, "pending", "", "", "", "", "", "", "", 1, 20).get("total"));
+    assertEquals(0, workflow.summary(50L, "pending").size());
+    assertEquals(1L, access.capabilities(20L).get("pending"));
+    assertEquals(1L, access.capabilities(1L).get("pending"));
+
+    workflow.read("DEMAND", id, version, 20L);
+    workflow.read("DEMAND", id, version, 1L);
+    assertEquals(0L, access.capabilities(20L).get("pending"));
+    assertEquals(0L, access.capabilities(1L).get("pending"));
+  }
+
+  @Test
+  void collectOnlyRejectsHandlingAndKeepsReadDelete() {
+    jdbc.update("UPDATE rm_demand_form SET collect_only=TRUE WHERE form_key='A'");
+    String id = create(100, 10L, false);
+    assertThrows(BaseException.class, () -> workflow.assign(id, 30L, revision(id), 1L));
+    assertThrows(
+        BaseException.class,
+        () ->
+            workflow.outcome(
+                id,
+                body(
+                    "revision",
+                    revision(id),
+                    "decision",
+                    "ACCEPTED",
+                    "progress",
+                    "PLANNED",
+                    "reason",
+                    "采纳说明",
+                    "completion",
+                    ""),
+                1L));
+    assertThrows(BaseException.class, () -> workflow.reply(id, "REPLY", "回复", 1L));
+    assertThrows(BaseException.class, () -> workflow.followUp(id, "追问", 10L));
+    assertThrows(
+        BaseException.class,
+        () -> workflow.publish(id, body("published", true, "version", 0), 1L));
+    assertThrows(BaseException.class, () -> workflow.autoPublish(id, revision(id), 1L));
+    assertThrows(BaseException.class, () -> workflow.skipPublication(id, revision(id), 1L));
+    long version =
+        number(
+            store.one("SELECT public_version FROM rm_demand WHERE id=?", id).get("publicVersion"));
+    workflow.read("DEMAND", id, version, 1L);
+    workflow.deleteDemand(id, revision(id), 1L);
+    assertEquals(0L, store.count("SELECT COUNT(*) FROM rm_demand WHERE id=?", id));
+  }
+
+  @Test
+  void collectOnlyDetailHidesHandling() {
+    jdbc.update("UPDATE rm_demand_form SET collect_only=TRUE WHERE form_key='A'");
+    String id = create(100, 10L, false);
+    Map<String, Object> manager = workflow.detail(id, 50L, null);
+    assertEquals(Boolean.TRUE, manager.get("collectOnly"));
+    assertEquals(Boolean.FALSE, manager.get("canHandle"));
+    assertEquals(Boolean.FALSE, manager.get("canAssign"));
+    assertEquals(Boolean.FALSE, manager.get("canPublish"));
+    assertEquals(Boolean.FALSE, manager.get("canFollowUp"));
+    assertEquals(Boolean.FALSE, manager.get("followupPending"));
+    assertNull(manager.get("publication"));
+    Map<String, Object> submitter = workflow.detail(id, 10L, null);
+    assertEquals(Boolean.FALSE, submitter.get("canFollowUp"));
+    assertEquals(Boolean.FALSE, submitter.get("canHandle"));
+  }
+
+  @Test
+  void collectOnlyConfigureAndListAreConsistent() {
+    forms.configure(
+        "A",
+        body(
+            "visibility",
+            "LOGIN",
+            "allowAnonymous",
+            true,
+            "published",
+            true,
+            "collectOnly",
+            true,
+            "revision",
+            0),
+        1L);
+    Map<String, Object> adminRow = forms.list(1L, true).get(0);
+    assertEquals(Boolean.TRUE, adminRow.get("collectOnly"));
+    assertEquals(Boolean.TRUE, forms.info("A", 10L).get("collectOnly"));
+    Map<String, Object> employeeRow = forms.list(10L, false).get(0);
+    assertEquals(Boolean.TRUE, employeeRow.get("collectOnly"));
+    assertEquals(Boolean.TRUE, employeeRow.get("canFill"));
+    forms.configure(
+        "A",
+        body(
+            "visibility",
+            "LOGIN",
+            "allowAnonymous",
+            true,
+            "published",
+            true,
+            "collectOnly",
+            false,
+            "revision",
+            1),
+        1L);
+    assertEquals(Boolean.FALSE, forms.list(1L, true).get(0).get("collectOnly"));
+  }
+
+  @Test
+  void selectedFormVisibleToFillHandleManageButNotOthers() {
+    jdbc.update("UPDATE rm_demand_form SET visibility='SELECTED' WHERE form_key='A'");
+    forms.member("A", 40L, body("canFill", true, "canHandle", false), 1L);
+    assertEquals(1, forms.list(40L, false).size());
+    assertEquals(1, forms.list(30L, false).size());
+    assertEquals(1, forms.list(50L, false).size());
+    assertTrue(forms.list(60L, false).isEmpty());
+    assertTrue(forms.list(10L, false).isEmpty());
+    Map<String, Object> fill = forms.list(40L, false).get(0);
+    assertEquals(Boolean.TRUE, fill.get("canFill"));
+    Map<String, Object> handle = forms.list(30L, false).get(0);
+    assertEquals(Boolean.FALSE, handle.get("canFill"));
+    assertEquals(Boolean.TRUE, handle.get("canHandle"));
+    Map<String, Object> manage = forms.list(50L, false).get(0);
+    assertEquals(Boolean.FALSE, manage.get("canFill"));
+    assertEquals(Boolean.TRUE, manage.get("canManage"));
+    assertThrows(BaseException.class, () -> access.requireFill("A", 30L, false));
+    assertThrows(BaseException.class, () -> access.requireFill("A", 50L, false));
+    access.requireFill("A", 40L, false);
+  }
+
+  @Test
+  void globalAdminPendingIncludesCollectOnlyUntilRead() {
+    String id = create(100, 10L, false);
+    assertEquals(1L, access.capabilities(1L).get("pending"));
+    jdbc.update("UPDATE rm_demand_form SET collect_only=TRUE WHERE form_key='A'");
+    assertEquals(1L, access.capabilities(1L).get("pending"));
+    long version =
+        number(
+            store.one("SELECT public_version FROM rm_demand WHERE id=?", id).get("publicVersion"));
+    workflow.read("DEMAND", id, version, 1L);
+    assertEquals(0L, access.capabilities(1L).get("pending"));
+  }
+
+  @Test
   @SuppressWarnings("unchecked")
   void followupVisibleToSubmitterAndStaffButNotOtherUsers() {
     String id = create(100, 10L, false);

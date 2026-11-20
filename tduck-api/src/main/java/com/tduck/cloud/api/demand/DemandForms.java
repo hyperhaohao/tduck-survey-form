@@ -21,7 +21,7 @@ public class DemandForms {
     boolean global = access.globalAdmin(userId);
     StringBuilder sql =
         new StringBuilder(
-            "SELECT f.form_key,f.name,f.description,f.status,c.summary,c.visibility,c.allow_anonymous,c.published,c.end_time,c.voided,c.revision,c.sort_no,(SELECT COUNT(*) FROM rm_demand d WHERE d.form_key=f.form_key) AS demand_count FROM fm_user_form f "
+            "SELECT f.form_key,f.name,f.description,f.status,c.summary,c.visibility,c.collect_only,c.allow_anonymous,c.published,c.end_time,c.voided,c.revision,c.sort_no,(SELECT COUNT(*) FROM rm_demand d WHERE d.form_key=f.form_key) AS demand_count FROM fm_user_form f "
                 + (management ? "LEFT" : "INNER")
                 + " JOIN rm_demand_form c ON c.form_key=f.form_key WHERE f.is_deleted=FALSE AND (f.is_folder=FALSE OR f.is_folder IS NULL)");
     List<Object> args = new ArrayList<>();
@@ -55,6 +55,16 @@ public class DemandForms {
                         ? !(flag(row.get("allowAnonymous"))
                             && "LOGIN".equals(row.get("visibility")))
                         : !access.visible(row, userId))));
+    DemandGrants grants = access.effectiveGrants(userId);
+    boolean globalAdmin = access.globalAdmin(userId);
+    for (Map<String, Object> row : rows) {
+      String key = String.valueOf(row.get("formKey"));
+      boolean login = "LOGIN".equals(String.valueOf(row.get("visibility")));
+      row.put("collectOnly", flag(row.get("collectOnly")));
+      row.put("canFill", userId != null && (login || grants.canFill(key)));
+      row.put("canHandle", userId != null && (globalAdmin || grants.canHandle(key)));
+      row.put("canManage", userId != null && (globalAdmin || grants.canManage(key)));
+    }
     return rows;
   }
   /** 元数据不泄露授权名单，允许经办人在后台查看停用的收集单。 */
@@ -77,6 +87,7 @@ public class DemandForms {
               && flag(form.get("published"))
               && flag(form.get("allowAnonymous"))
               && "LOGIN".equals(form.get("visibility")));
+      gate.put("collectOnly", !deleted && flag(form.get("collectOnly")));
       return gate;
     }
     if (deleted) {
@@ -111,31 +122,37 @@ public class DemandForms {
         end == null || end.toString().isEmpty() ? null : java.sql.Timestamp.valueOf(end.toString());
     Map<String, Object> old =
         store.one("SELECT * FROM rm_demand_form WHERE form_key=? FOR UPDATE", key);
+    boolean collectOnly =
+        body.containsKey("collectOnly")
+            ? flag(body.get("collectOnly"))
+            : old != null && flag(old.get("collectOnly"));
     if (old == null) {
       Map<String, Object> next =
           store.one("SELECT COALESCE(MIN(sort_no),0)-1 AS next_sort FROM rm_demand_form");
       long sortNo =
           next == null || next.get("nextSort") == null ? 0 : number(next.get("nextSort"));
       store.update(
-          "INSERT INTO rm_demand_form(form_key,summary,visibility,allow_anonymous,published,end_time,sort_no) VALUES(?,?,?,?,?,?,?)",
+          "INSERT INTO rm_demand_form(form_key,summary,visibility,allow_anonymous,published,end_time,sort_no,collect_only) VALUES(?,?,?,?,?,?,?,?)",
           key,
           summary,
           visibility,
           anonymous,
           flag(body.get("published")),
           endTime,
-          sortNo);
+          sortNo,
+          collectOnly);
       grantCreatorManager(key);
     } else {
       long revision = Long.parseLong(String.valueOf(body.getOrDefault("revision", -1)));
       if (revision != number(old.get("revision"))) throw new BaseException("配置已变化，请刷新后重试", 409);
       store.update(
-          "UPDATE rm_demand_form SET summary=?,visibility=?,allow_anonymous=?,published=?,end_time=?,revision=revision+1 WHERE form_key=?",
+          "UPDATE rm_demand_form SET summary=?,visibility=?,allow_anonymous=?,published=?,end_time=?,collect_only=?,revision=revision+1 WHERE form_key=?",
           summary,
           visibility,
           anonymous,
           flag(body.get("published")),
           endTime,
+          collectOnly,
           key);
       if (!access.hasOtherManager(key, null, null)) grantCreatorManager(key);
     }

@@ -24,9 +24,9 @@ public class DemandWorkflow {
   private static final String FROM =
       " FROM rm_demand d JOIN fm_user_form f ON f.form_key=d.form_key";
   private static final String ROW_SELECT =
-      "SELECT d.id,d.form_key,d.request_no,d.title,d.submitter_name,d.submitted_by,d.handler_id,d.decision,d.progress,d.reason,d.completion,d.create_time,d.update_time,d.public_version,d.publication_skipped,d.followup_at AS followup_at,d.revision,f.name AS form_name,h.name AS handler_name,pub.published AS publication_published,pub.archived_at AS publication_archived_at,pub.deleted_at AS publication_deleted_at,pub.version AS publication_version,(SELECT MAX(m.create_time) FROM rm_demand_message m WHERE m.demand_id=d.id AND m.kind='REPLY') AS reply_time,CASE WHEN d.public_version>COALESCE(r.seen_version,1) THEN TRUE ELSE FALSE END AS unread"
+      "SELECT d.id,d.form_key,d.request_no,d.title,d.submitter_name,d.submitted_by,d.handler_id,d.decision,d.progress,d.reason,d.completion,d.create_time,d.update_time,d.public_version,d.publication_skipped,d.followup_at AS followup_at,d.revision,c.collect_only,f.name AS form_name,h.name AS handler_name,pub.published AS publication_published,pub.archived_at AS publication_archived_at,pub.deleted_at AS publication_deleted_at,pub.version AS publication_version,(SELECT MAX(m.create_time) FROM rm_demand_message m WHERE m.demand_id=d.id AND m.kind='REPLY') AS reply_time,CASE WHEN d.public_version>COALESCE(r.seen_version,1) THEN TRUE ELSE FALSE END AS unread"
           + FROM
-          + " LEFT JOIN ac_user h ON h.id=d.handler_id LEFT JOIN rm_demand_publication pub ON pub.demand_id=d.id LEFT JOIN rm_demand_read r ON r.object_type='DEMAND' AND r.object_id=d.id AND r.user_id=?";
+          + " LEFT JOIN rm_demand_form c ON c.form_key=d.form_key LEFT JOIN ac_user h ON h.id=d.handler_id LEFT JOIN rm_demand_publication pub ON pub.demand_id=d.id LEFT JOIN rm_demand_read r ON r.object_type='DEMAND' AND r.object_id=d.id AND r.user_id=?";
   /** 分页查询，按权限过滤后再统计数量。 */
   public Map<String, Object> list(
       Long userId,
@@ -151,16 +151,21 @@ public class DemandWorkflow {
     DemandGrants grants = access.effectiveGrants(userId);
     for (Map<String, Object> row : rows) {
       String key = String.valueOf(row.get("formKey"));
-      row.put("canHandle", grants.canHandle(key));
+      boolean collectOnly = flag(row.get("collectOnly"));
+      row.put("collectOnly", collectOnly);
+      row.put("canHandle", !collectOnly && grants.canHandle(key));
       row.put("canManage", global || grants.canManage(key));
-      row.put("followupPending", row.remove("followupAt") != null);
+      row.put("followupPending", !collectOnly && row.remove("followupAt") != null);
       Object archived = row.remove("publicationArchivedAt");
       Object deleted = row.remove("publicationDeletedAt");
       row.put(
           "publicationPublished",
-          flag(row.get("publicationPublished")) && archived == null && deleted == null);
-      row.put("publicationArchived", archived != null && deleted == null);
-      row.put("publicationDeleted", deleted != null);
+          !collectOnly
+              && flag(row.get("publicationPublished"))
+              && archived == null
+              && deleted == null);
+      row.put("publicationArchived", !collectOnly && archived != null && deleted == null);
+      row.put("publicationDeleted", !collectOnly && deleted != null);
     }
   }
   /** 按收集单汇总当前范围的需求数量，供页面先选收集单再下钻。 */
@@ -176,26 +181,32 @@ public class DemandWorkflow {
     List<Object> rowArgs = new ArrayList<>();
     rowArgs.add(userId);
     rowArgs.addAll(args);
-    String pendingExpression =
-        "pending".equals(scope)
-            ? "COUNT(*)"
-            : "mine".equals(scope)
-                ? "SUM(CASE WHEN d.decision<>'REJECTED' AND d.progress<>'COMPLETED' THEN 1 ELSE 0 END)"
-                : "SUM(CASE WHEN (d.decision<>'REJECTED' AND d.progress<>'COMPLETED') OR d.followup_at IS NOT NULL THEN 1 ELSE 0 END)";
+    String pendingExpression;
+    if ("pending".equals(scope)) pendingExpression = "COUNT(*)";
+    else if ("mine".equals(scope))
+      pendingExpression =
+          "SUM(CASE WHEN (c.collect_only IS NULL OR c.collect_only=FALSE) AND d.decision<>'REJECTED' AND d.progress<>'COMPLETED' THEN 1 ELSE 0 END)";
+    else
+      pendingExpression =
+          "SUM(CASE WHEN c.collect_only=TRUE THEN CASE WHEN d.public_version>COALESCE(r.seen_version,1) THEN 1 ELSE 0 END ELSE CASE WHEN (d.decision<>'REJECTED' AND d.progress<>'COMPLETED') OR d.followup_at IS NOT NULL THEN 1 ELSE 0 END END)";
     List<Map<String, Object>> rows =
         store.rows(
             "SELECT d.form_key,f.name AS form_name,COUNT(*) AS total,"
                 + "SUM(CASE WHEN d.public_version>COALESCE(r.seen_version,1) THEN 1 ELSE 0 END) AS unread,"
+                + "MAX(CASE WHEN c.collect_only=TRUE THEN 1 ELSE 0 END) AS collect_only,"
                 + pendingExpression
                 + " AS pending,"
                 + "MAX(d.update_time) AS last_update"
                 + " FROM rm_demand d JOIN fm_user_form f ON f.form_key=d.form_key"
+                + " LEFT JOIN rm_demand_form c ON c.form_key=d.form_key"
                 + " LEFT JOIN rm_demand_read r ON r.object_type='DEMAND' AND r.object_id=d.id AND r.user_id=?"
                 + where
                 + " GROUP BY d.form_key,f.name ORDER BY last_update DESC,d.form_key",
             rowArgs.toArray());
-    for (Map<String, Object> row : rows)
+    for (Map<String, Object> row : rows) {
+      row.put("collectOnly", flag(row.get("collectOnly")));
       row.put("canManage", global || grants.canManage(String.valueOf(row.get("formKey"))));
+    }
     return rows;
   }
   /** 读取需求，查询码、本人身份及总表权限严格隔离。 */
@@ -214,6 +225,9 @@ public class DemandWorkflow {
   public Map<String, Object> detail(String demandId, Long userId, String queryCode) {
     Map<String, Object> d = new LinkedHashMap<>(demand(demandId, userId, queryCode, false));
     String formKey = d.get("formKey").toString();
+    Map<String, Object> config = access.form(formKey);
+    boolean collectOnly = config != null && flag(config.get("collectOnly"));
+    d.put("collectOnly", collectOnly);
     boolean staff = access.table(formKey, userId);
     boolean manage = access.manage(formKey, userId);
     Long submitterId = number(d.get("submitterId"));
@@ -240,12 +254,13 @@ public class DemandWorkflow {
     d.put("canManage", manage);
     d.put(
         "canHandle",
-        manage
-            || (userId != null
-                && userId.equals(number(d.get("handlerId")))
-                && access.handler(formKey, userId)));
-    d.put("canAssign", manage);
-    d.put("canPublish", manage);
+        !collectOnly
+            && (manage
+                || (userId != null
+                    && userId.equals(number(d.get("handlerId")))
+                    && access.handler(formKey, userId))));
+    d.put("canAssign", manage && !collectOnly);
+    d.put("canPublish", manage && !collectOnly);
     String messageSql =
         "SELECT id,author_id,author_name,kind,content,create_time FROM rm_demand_message WHERE demand_id=? AND ";
     if (staff)
@@ -267,10 +282,14 @@ public class DemandWorkflow {
             > 0;
     d.put(
         "canFollowUp",
-        userId != null && !anonymous && userId.equals(submitterId) && collectionActive);
-    d.put("followupPending", d.get("followupAt") != null);
+        !collectOnly
+            && userId != null
+            && !anonymous
+            && userId.equals(submitterId)
+            && collectionActive);
+    d.put("followupPending", !collectOnly && d.get("followupAt") != null);
     Map<String, Object> publication =
-        manage
+        manage && !collectOnly
             ? store.one("SELECT * FROM rm_demand_publication WHERE demand_id=?", demandId)
             : null;
     if (publication != null) {
@@ -305,6 +324,7 @@ public class DemandWorkflow {
   public void assign(String id, Long handlerId, long revision, Long userId) {
     Map<String, Object> d = demand(id, userId, null, true);
     access.requireManage(d.get("formKey").toString(), userId);
+    requireWorkflow(d.get("formKey").toString());
     checkRevision(d, revision);
     if (handlerId != null && !access.handler(d.get("formKey").toString(), handlerId))
       throw new BaseException("请选择该收集单已授权的经办人");
@@ -319,6 +339,7 @@ public class DemandWorkflow {
   public void outcome(String id, Map<String, Object> body, Long userId) {
     Map<String, Object> d = demand(id, userId, null, true);
     access.requireHandle(d, userId);
+    requireWorkflow(d.get("formKey").toString());
     checkRevision(d, number(body.get("revision")));
     String decision = String.valueOf(body.get("decision"));
     String progress = String.valueOf(body.get("progress"));
@@ -359,6 +380,7 @@ public class DemandWorkflow {
   public void reply(String id, String kind, String content, Long userId) {
     Map<String, Object> d = demand(id, userId, null, true);
     access.requireHandle(d, userId);
+    requireWorkflow(d.get("formKey").toString());
     if (!Arrays.asList("REPLY", "NOTE", "DRAFT").contains(kind)) throw new BaseException("回复类型无效");
     content = text(content, 10000);
     if ("DRAFT".equals(kind))
@@ -393,6 +415,7 @@ public class DemandWorkflow {
             "SELECT COUNT(*) FROM fm_user_form WHERE form_key=? AND is_deleted=FALSE",
             d.get("formKey"))
         == 0) throw new BaseException("该收集单已删除", 403);
+    requireWorkflow(d.get("formKey").toString());
     content = text(content, 10000);
     store.update(
         "UPDATE rm_demand SET followup_at=CURRENT_TIMESTAMP,update_time=CURRENT_TIMESTAMP WHERE id=?",
@@ -517,6 +540,7 @@ public class DemandWorkflow {
     if (old != null && expected != number(old.get("version")))
       throw new BaseException("公示已变化，请刷新后重试", 409);
     boolean publish = flag(body.get("published"));
+    if (publish) requireWorkflow(d.get("formKey").toString());
     if (!publish) {
       if (old != null)
         store.update(
@@ -556,6 +580,7 @@ public class DemandWorkflow {
   public Map<String, Object> autoPublish(String id, Long revision, Long userId) {
     Map<String, Object> d = demand(id, userId, null, true);
     access.requireManage(d.get("formKey").toString(), userId);
+    requireWorkflow(d.get("formKey").toString());
     checkRevision(d, revision);
     Map<String, Object> old =
         store.one("SELECT * FROM rm_demand_publication WHERE demand_id=? FOR UPDATE", id);
@@ -611,6 +636,7 @@ public class DemandWorkflow {
   public Map<String, Object> skipPublication(String id, Long revision, Long userId) {
     Map<String, Object> d = demand(id, userId, null, true);
     access.requireManage(d.get("formKey").toString(), userId);
+    requireWorkflow(d.get("formKey").toString());
     Map<String, Object> publication =
         store.one(
             "SELECT published,deleted_at FROM rm_demand_publication WHERE demand_id=? FOR UPDATE",
@@ -712,6 +738,12 @@ public class DemandWorkflow {
       for (Object child : (Collection<?>) value) if (containsUrl(child, url)) return true;
     }
     return false;
+  }
+  /** 只收集收集单不允许进入回复、采纳或公示流程。 */
+  private void requireWorkflow(String formKey) {
+    Map<String, Object> config = access.form(formKey);
+    if (config != null && flag(config.get("collectOnly")))
+      throw new BaseException("该收集单仅收集信息，无需回复或公示", 409);
   }
   /** 公示前必须有明确的采纳结果，正式回复不是前置条件。 */
   private void requireDecision(Map<String, Object> demand) {

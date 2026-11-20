@@ -141,11 +141,17 @@ public class DemandAccess {
             > 0;
   }
 
-  /** 是否在填报名单中。 */
-  public boolean visible(Map<String, Object> form, Long userId) {
+  /** 是否可填报：LOGIN 收集单对所有登录用户开放，指定人员只认 can_fill。 */
+  public boolean canFill(Map<String, Object> form, Long userId) {
     if (userId == null) return false;
     return "LOGIN".equals(form.get("visibility"))
         || effectiveGrants(userId).canFill(String.valueOf(form.get("formKey")));
+  }
+  /** 列表可见：LOGIN 或任一成员权限（填报/经办/管理）。 */
+  public boolean visible(Map<String, Object> form, Long userId) {
+    if (userId == null) return false;
+    if ("LOGIN".equals(form.get("visibility"))) return true;
+    return effectiveGrants(userId).allForms().contains(String.valueOf(form.get("formKey")));
   }
   /** 校验填报方式、发布状态和截止时间，不能用匿名绕过名单。 */
   public void requireFill(String key, Long userId, boolean anonymous) {
@@ -161,7 +167,7 @@ public class DemandAccess {
     if (anonymous) {
       if (!flag(form.get("allowAnonymous")) || !"LOGIN".equals(form.get("visibility")))
         throw new BaseException("该收集单不允许匿名填写", 403);
-    } else if (!visible(form, userId)) throw new BaseException("请登录后使用有填报权限的账户填写", 403);
+    } else if (!canFill(form, userId)) throw new BaseException("请登录后使用有填报权限的账户填写", 403);
   }
   /** 校验当前经办人，管理员身份不能代替经办分派。 */
   public void requireAssigned(Map<String, Object> demand, Long userId) {
@@ -214,7 +220,7 @@ public class DemandAccess {
     StringBuilder pendingWhere =
         new StringBuilder(" WHERE f.is_deleted=FALSE");
     List<Object> pendingArgs = new ArrayList<>();
-    DemandScope.pending(pendingWhere, pendingArgs, userId, grants);
+    DemandScope.pending(pendingWhere, pendingArgs, userId, grants, global);
     m.put(
         "pending",
         store.count(

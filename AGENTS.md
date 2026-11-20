@@ -26,6 +26,8 @@
 - 填报者、经办人、单据管理员能力取并集。管理员分为两级：全局管理员（原系统超级管理员、`ruima.demand.admin-ids`）看全部收集单；后台管理员（`rm_demand_admin`）可进后台并建单，但只看本人创建或 `can_manage` 的收集单。仅后台管理员及以上可创建收集单，前端按能力显示入口，后端必须校验权限。经办人查看获授权总表，仅处理分派给自己的需求；单据管理员由 `rm_demand_acl.can_manage` 授予，创建人默认拥有且每个收集单至少保留一名，可查看本收集单全部未办结需求、分派经办、代填结果并发布或跳过公示。全局管理员对所有收集单拥有同等能力。
 - “管理员授权”与全局配置仅全局管理员可操作；撤销后台管理员只移除 `rm_demand_admin`，不自动回收各收集单的 `can_manage`。原表单后台（我的项目）入口、原表单数据、报表、回收站等仍仅全局管理员可用；后台管理员通过“新建收集单/设计与发布”进入原表单设计器。表单级提交、回收、通知、分享、数据推送设置随该收集单的管理权限开放。
 - 收集单可作废/恢复：作废后停止新填报并从员工入口隐藏，已有需求与处理记录保留；删除原表单仍按原回收站规则，不自动清理需求数据。单据管理员或全局管理员可删除单条需求：删除需求、消息、已读和公示，原答卷保留在原表单数据中。
+- 收集单可设为“只收集”：不进入正式回复、采纳与公示；需求未读时计入待我处理，打开详情标记已读后移出待办，角标同步减少。详情隐藏全部处理区，仍可查看提交内容；`read` 与删除保留，回复/采纳/分派/追问/发布接口拒绝。
+- 收集单首页可见范围跟随填报与成员权限：`LOGIN` 对所有登录用户可见可填；`SELECTED` 对 `can_fill`、`can_handle`、`can_manage` 任一成员可见，但只有 `can_fill` 能填报；非填报成员卡片显示“查看需求”，进入待我处理或获授权总表。
 - 公示由全局管理员或该收集单的单据管理员审核后发布快照，公示前必须已有明确采纳结果（采纳/暂缓/不采纳），正式回复为选填，内部备注和草稿不能替代，私有处理进展不自动覆盖已发布内容；“不公示”记录 `publication_skipped` 并移出待办，之后可重新发布。本人数据、内部备注和附件均按实际权限隔离。登录填报者可在详情中追问本人非匿名需求，追问后需求重新进入经办人/单据管理员待办，只有新的正式回复才清除；匿名需求暂不支持在线追问。首页收集单由全局管理员拖动保存全局顺序，所有用户按该顺序看到；新建收集单默认最前，需求收集页不启用拖动。
 - 保留首页可见收集单、我的需求、待我处理、需求公示、后台管理；保留侧栏收缩、手机抽屉和未读数量角标。
 - 用户界面只显示“登录”；统一登录的技术配置仅出现在运维与代码说明中。
@@ -60,9 +62,10 @@ git rev-list --left-right --count HEAD...origin/haoX/tduck-demand-loop
 
 - Java 8、Spring Boot 2.7.8、Maven多模块、MyBatis Plus/MySQL；当前运行实例使用EHCache，不因旧文档默认新增Redis。
 - 扩展入口为 `tduck-api/src/main/java/com/tduck/cloud/api/demand/`：DemandForms收集单、DemandAccess权限、DemandScope列表与待办口径、DemandSubmission提交关联、DemandWorkflow处理、DemandExport导出、DemandGuard管理约束、DemandDepartments部门目录与成员名册、DemandFormFields填报人部门快照、DemandFileGuard附件保护、OidcController/OidcIdentityService登录。
+- 只收集与成员可见性：`rm_demand_form.collect_only`；`DemandScope.pending` 分为普通未办结、只收集未读、追问，全局管理员跨 ACL 看待办；`DemandAccess.canFill` 是唯一填报闸门，`visible` 仅决定列表可见；`DemandWorkflow.requireWorkflow` 拒绝只收集的处理写操作，详情/列表返回 `collectOnly`。
 - AI 建表与设计器协作在 `tduck-ai`：`AiController`（`/ai/status`、`/ai/gen-form-chat/stream`、旧 GET 兼容）、`AiConfiguration` 从 `sys_env_config.deepSeekEnvConfig` 构建普通/深入思考服务、`AiHistoryBuilder` 裁剪多轮历史并注入当前表单/方案、`AiStreamParser` 解析 `content`/`reasoning_content`。流式接口支持 `mode=create/revise`、`stage=clarify/plan/generate` 与 `planJson`；提示词为 `form-prompt-clarify.md`、`form-prompt-plan.md`、`form-prompt-deepseek.md`、`form-prompt-revise.md`。配置、模型、权限、配图与排障见 `doc/AI建表与协作说明.md`；Nginx 的 `/ai/` location 必须关闭缓冲并放宽读超时。
 - `/demand-api/*`为业务接口，`/demand/*`为前端页面；原提交接口与需求索引应保持同一事务，处理与分派保留版本校验、行锁及冲突拒绝。批量操作由前端逐条调用单条接口，不新增服务端批量事务。
-- 新增表定义见 `doc/ruima-demand-schema.sql`；仅首次初始化执行一次，后续使用增量迁移。单据管理员与不公示升级使用 `doc/migration-20261114-form-manager.sql`，只执行一次。部门快照、收集单排序与部门题移除使用 `doc/ruima-demand-migration-20261119-demand-delete-dept-sort.sql`，只执行一次；旧的 `doc/migration-20261119-dept-field.sql` 已被该迁移取代，新环境不再执行。公示归档/删除状态使用 `doc/ruima-demand-migration-20261119-publication-state.sql`，只新增 `rm_demand_publication` 列。不得向已有业务库重导会删表的官方初始化SQL，不重复执行独立索引创建语句。
+- 新增表定义见 `doc/ruima-demand-schema.sql`；仅首次初始化执行一次，后续使用增量迁移。单据管理员与不公示升级使用 `doc/migration-20261114-form-manager.sql`，只执行一次。部门快照、收集单排序与部门题移除使用 `doc/ruima-demand-migration-20261119-demand-delete-dept-sort.sql`，只执行一次；旧的 `doc/migration-20261119-dept-field.sql` 已被该迁移取代，新环境不再执行。只收集模式使用 `doc/ruima-demand-migration-20261120-collect-only.sql`，只新增 `rm_demand_form.collect_only`。公示归档/删除状态使用 `doc/ruima-demand-migration-20261119-publication-state.sql`，只新增 `rm_demand_publication` 列。不得向已有业务库重导会删表的官方初始化SQL，不重复执行独立索引创建语句。
 - 功能开关为 `ruima.demand.enabled`。存在私有数据时不能通过直接关开关并开放旧静态附件路径回退。
 - 登录保留授权码、PKCE、签名、issuer、audience、nonce、组织及禁用状态校验，使用issuer与subject映射身份，不通过邮箱/姓名合并或信任上游声明直接授予管理员。
 - 私有附件通过需求授权下载接口读取，保留旧静态路径绕过防护。新接口不能只依靠前端菜单隐藏保护。
@@ -77,7 +80,7 @@ mvn -B -pl tduck-api -am package
 ```
 
 - 产物：`tduck-api/target/tduck-api.jar`。外部配置示例为 `tduck-api/src/main/resources/application-demand.example.yml`；真实运行配置必须留在忽略文件或服务器受限目录。
-- DemandWorkflowTest和OidcIdentityServiceTest使用隔离H2及合成登录服务。按变更覆盖越权、匿名、经办结果、备注隔离、公示快照、角标、冲突及附件；本轮另覆盖需求删除级联、部门快照与旧键过滤、采纳结果拒绝待评估、无正式回复可公示、全局排序与新建收集单置顶。只运行必要检查，不使用真实库当单元测试库。
+- DemandWorkflowTest和OidcIdentityServiceTest使用隔离H2及合成登录服务。按变更覆盖越权、匿名、经办结果、备注隔离、公示快照、角标、冲突及附件；本轮另覆盖需求删除级联、部门快照与旧键过滤、采纳结果拒绝待评估、无正式回复可公示、全局排序与新建收集单置顶；本轮新增只收集待办已读清零、拒绝处理写操作、详情 flags、配置/列表、SELECTED 成员可见与填报闸门、全局管理员待办。只运行必要检查，不使用真实库当单元测试库。
 - 2026-11-14 单据管理员、导出与批量改造：后端25项隔离测试通过；已部署240并完成数据库增量迁移，线上接口冒烟通过，合成数据已清理；尚未推送 GitHub。历史基线：2026-11-13后端18项隔离测试、240真实API16项及员工本人登录通过；2026-11-14品牌页面另有10项隔离和10项真实浏览器检查。不是本次文档修改重新执行的结果。
 - 2026-11-14 公示前置正式回复：手工发布与自动发布入口统一要求已有 `REPLY`，新增1项隔离测试；`mvn -B -pl tduck-api -am test` 26项通过（DemandWorkflowTest 22、OidcIdentityServiceTest 4）。尚未部署、尚未推送。
 - 2026-11-14 后台管理员分级：`rm_demand_admin` 仅获后台入口与建单能力，后台列表/总表/汇总/导出按本人创建或 `can_manage` 过滤；`/admin/roles` 仍仅全局管理员，原表单数据/报表/回收站仍仅全局管理员。后端 29 项隔离测试、240真实浏览器4项通过（DemandWorkflowTest 25、OidcIdentityServiceTest 4）；已部署240（应用镜像 `sha256:b6bf2581c2e19a6b398a0deccea16ee2a2a9b9379d545221c490dc73fd9c1059`），无数据库变更；尚未推送 GitHub。
@@ -94,6 +97,7 @@ mvn -B -pl tduck-api -am package
 - 2026-11-19 公示归档/删除与测试表单清理：`rm_demand_publication` 新增 `archived_at/archived_by/deleted_at/deleted_by`；新增 `POST /demand-api/publications/{id}/archive|delete`，仅 `requireManage`（单据管理员或全局管理员）；公示列表/详情/未读/导出排除已归档、已删除和已删除收集单；`DemandScope.pending` 仅把未删除的已发布公示视为已公示。后端 70 项、前端 52 项回归通过；已部署 237（应用镜像 `sha256:00e65ed0…`，JAR `86642248…`，静态 151 个文件，`index.html` `82aeccba…`，备份 `publication-state-20261119-pre`），迁移已执行，公示列表与未读为 0，归档/删除路由冒烟 404，1440/1024 真实浏览器列宽与无溢出核对通过；同日按精确 ID 彻底删除 `EpA5AG0f`「需求征集（测试）」的 2 条需求、2 份答卷、2 条消息、2 条已读、2 条 ACL 和 1 条公示，其他收集单计数不变，备份 `testform-purge-20261119-pre`（`42a58e40…`），回收站不再显示该表单；尚未推送 GitHub。
 - 2026-11-19 填报者追问：`rm_demand` 新增 `followup_at`，新增 `POST /demand-api/requests/{id}/followup`（仅登录的填报者本人、非匿名、收集单未删除）；写入 `FOLLOWUP` 消息，`DemandScope.pending` 增加“未答复追问”分支（不受办结/公示/跳过限制），只有 `REPLY` 清除 `followup_at`，`NOTE`/`EVENT`/`DRAFT` 不清除；`summary` 的 pending 列按 scope 区分。后端 75 项、前端 57 项回归通过；已部署 237（应用镜像 `sha256:9bd25ac3…`，JAR `1f2046cb…`，静态 151 个文件，`index.html` `8c287709…`，备份 `followup-20261119-pre`），迁移已执行，真实接口与 1024/1440 浏览器追问/回复/空状态/按钮对齐通过，合成数据已清理；尚未推送 GitHub。
 - 2026-11-19 需求删除、部门快照、结果必填与全局排序：新增 `POST /requests/{id}/delete`（清理消息、已读、公示，原答卷保留）；移除填报人部门题目并改为 `rm_demand.department` 提交快照，详情固定显示；`outcome` 拒绝待评估，采纳结果/说明及条件进度、完成说明显示必填星号，正式回复改为选填，公示前置由“正式回复”改为“明确采纳结果”；`rm_demand_form.sort_no` 与 `POST /admin/forms/sort` 支持全局管理员首页全局排序，新建收集单默认最前。后端 79 项（DemandWorkflowTest 52）、前端 60 项回归通过，生产构建通过；已部署 237（迁移已执行，JAR `bd46db6e…`，镜像 `sha256:fa76fbce…`，静态 152 个文件，`index.html` `38600e88…`，备份 `demand-state-20261120-pre`），真实浏览器验收通过，合成数据已清理；已推送 GitHub。
+- 2026-11-20 只收集与成员可见性：新增 `rm_demand_form.collect_only` 与 `doc/ruima-demand-migration-20261120-collect-only.sql`；`DemandScope.pending` 增加只收集未读与全局管理员分支，`DemandAccess` 拆分 `canFill`/`visible`，`DemandWorkflow` 拒绝只收集处理写操作并返回 `collectOnly`；前端后台开关、首页标签/查看需求、待办已读重载、详情隐藏全部处理区。后端 85 项（DemandWorkflowTest 58、Oidc 4）、前端 65 项回归通过，生产构建通过；JAR `e6a71739…`，`index.html` `811532ca…`，152 个静态文件；尚未部署、尚未推送。
 - 尚未完成整栈异机恢复、异机备份、多人并发压测及业务试点完整验收；不能据此宣称已正式投产。
 
 ## 240部署边界
