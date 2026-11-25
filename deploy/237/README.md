@@ -57,6 +57,9 @@
 
 - 2026-11-20 需求导出列顺序调整（仅后端）：需求导出列顺序改为 `提报时间/收集单/填报者/填报人部门/填报题目或填报内容/其他填报内容/需求编号/需求标题/经办人/采纳结果/实施进度/回复时间`；单收集单保留逐题列，跨收集单保留 `填报内容` 文本。后端 87 项测试通过；JAR `ae1ea085e8484a8f908821da55a6bcd8f88e35fb9ad6a3bc65570170e830228c`，应用镜像 `sha256:ced5029421d5e31c891e4c5c35487739e98b72444bbc8d2c8a8f0d8f38fc6634`，旧镜像 `f4f18b91…` 保留为 `ruima/survey:20261120-before-export-order`；静态不变 `4b4b080e…`；备份 `/data/apps/ruima-survey/backups/export-order-20261120-pre`，报告 `reports/export-order-deployment-20261120.json`。app `healthy`，9 个页面均 200；当前库内 0 条需求，`导出全部` 表头 11 列顺序实测为新顺序，单收集单 16 列顺序由 H2 测试覆盖。首次部署脚本因校验变量作用域失败已自动回滚到 `f4f18b91`，修正后重试成功；未改静态、未改库。代码已提交并推送：后端 `3614203`、前端 `e4a8f41`。
 
+- 2026-11-24 全局管理员授权（马少卿）：`ruima.demand.admin-ids` 新增本地用户 `910051`（马少卿）；配置备份 `backups/application-test.yml.20261124-025929-pre-ma-shaoqing-global-admin`（`c65adbcf…`），新配置 `d3f95d6c…`；app 重启后 `healthy`，`/`、`/demand/home`、`/demand/admin`、`/project/my`、`/login/entry` 均 200。授权已配置，本人登录核验结果未记录。
+- 2026-11-25 全局管理员授权（RMAdmin）：`ruima.demand.admin-ids` 增加本地用户 `910005`（Casdoor `RMAdmin` 身份映射的“Outline Admin”），名单为 `[910051, 910005]`；配置备份 `backups/application-test.yml.20261125-035041-pre-rmadmin-global-admin`（`d3f95d6c…`），新配置 `cf96d5cf…`；app 重启后 `healthy`，5 个页面均 200；RMAdmin 登录核验全局管理员入口通过。
+
 ## 五、外网映射与验证（2026-11-16 已完成）
 
 1. 路由器已将公网端口 93 转发到 `192.168.1.237:18000`（TCP）。
