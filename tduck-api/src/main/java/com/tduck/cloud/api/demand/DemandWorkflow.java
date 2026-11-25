@@ -26,7 +26,7 @@ public class DemandWorkflow {
   private static final String FROM =
       " FROM rm_demand d JOIN fm_user_form f ON f.form_key=d.form_key";
   private static final String ROW_SELECT =
-      "SELECT d.id,d.form_key,d.request_no,d.title,d.submitter_name,d.submitted_by,d.handler_id,d.decision,d.progress,d.reason,d.completion,d.create_time,d.update_time,d.public_version,d.publication_skipped,d.followup_at AS followup_at,d.approval_status,d.revision,c.collect_only,f.name AS form_name,h.name AS handler_name,pub.published AS publication_published,pub.archived_at AS publication_archived_at,pub.deleted_at AS publication_deleted_at,pub.version AS publication_version,(SELECT MAX(m.create_time) FROM rm_demand_message m WHERE m.demand_id=d.id AND m.kind='REPLY') AS reply_time,CASE WHEN c.collect_only=TRUE THEN CASE WHEN r.seen_version IS NULL OR r.seen_version<d.public_version THEN TRUE ELSE FALSE END ELSE d.public_version>COALESCE(r.seen_version,1) END AS unread"
+      "SELECT d.id,d.form_key,d.request_no,d.title,d.submitter_name,d.submitted_by,d.handler_id,d.decision,d.progress,d.reason,d.completion,d.create_time,d.update_time,d.public_version,d.publication_skipped,d.followup_at AS followup_at,d.approval_status,d.approval_mode,d.approval_step,d.revision,c.collect_only,f.name AS form_name,h.name AS handler_name,pub.published AS publication_published,pub.archived_at AS publication_archived_at,pub.deleted_at AS publication_deleted_at,pub.version AS publication_version,(SELECT MAX(m.create_time) FROM rm_demand_message m WHERE m.demand_id=d.id AND m.kind='REPLY') AS reply_time,CASE WHEN c.collect_only=TRUE THEN CASE WHEN r.seen_version IS NULL OR r.seen_version<d.public_version THEN TRUE ELSE FALSE END ELSE d.public_version>COALESCE(r.seen_version,1) END AS unread"
           + FROM
           + " LEFT JOIN rm_demand_form c ON c.form_key=d.form_key LEFT JOIN ac_user h ON h.id=d.handler_id LEFT JOIN rm_demand_publication pub ON pub.demand_id=d.id LEFT JOIN rm_demand_read r ON r.object_type='DEMAND' AND r.object_id=d.id AND r.user_id=?";
   /** 分页查询，按权限过滤后再统计数量。 */
@@ -191,6 +191,11 @@ public class DemandWorkflow {
     if (rows.isEmpty()) return;
     boolean global = access.globalAdmin(userId);
     DemandGrants grants = access.effectiveGrants(userId);
+    List<String> approvalIds = new ArrayList<>();
+    for (Map<String, Object> row : rows)
+      if ("PENDING".equals(String.valueOf(row.get("approvalStatus"))))
+        approvalIds.add(String.valueOf(row.get("id")));
+    Map<String, Map<String, Object>> approvalSummaries = approval.summaries(approvalIds);
     for (Map<String, Object> row : rows) {
       String key = String.valueOf(row.get("formKey"));
       boolean collectOnly = flag(row.get("collectOnly"));
@@ -200,6 +205,8 @@ public class DemandWorkflow {
       row.put("canHandle", !collectOnly && grants.canHandle(key));
       row.put("canManage", global || grants.canManage(key));
       row.put("followupPending", !collectOnly && row.remove("followupAt") != null);
+      Map<String, Object> summary = approvalSummaries.get(String.valueOf(row.get("id")));
+      if (summary != null) row.putAll(summary);
       Object archived = row.remove("publicationArchivedAt");
       Object deleted = row.remove("publicationDeletedAt");
       row.put(
@@ -269,8 +276,18 @@ public class DemandWorkflow {
     boolean staff = access.table(d.get("formKey").toString(), userId);
     boolean own = userId != null && userId.equals(number(d.get("submitterId")));
     boolean anonymous = flag(d.get("anonymous")) && matches((String) d.get("queryHash"), queryCode);
-    boolean approver =
-        userId != null && userId.equals(number(d.get("approvalLeaderId")));
+    boolean approver = false;
+    if (userId != null) {
+      approver =
+          userId.equals(number(d.get("approvalLeaderId")))
+              || store.count(
+                      "SELECT COUNT(*) FROM rm_demand_approval_step s "
+                          + "JOIN rm_demand_approval_approver a ON a.step_id=s.id "
+                          + "WHERE s.demand_id=? AND a.user_id=?",
+                      demandId,
+                      userId)
+                  > 0;
+    }
     if (!staff && !own && !anonymous && !approver)
       throw new BaseException("需求不存在或无权访问", 403);
     return d;
@@ -306,8 +323,25 @@ public class DemandWorkflow {
     d.put("formFields", fieldList);
     String approvalStatus = String.valueOf(d.getOrDefault("approvalStatus", "NONE"));
     d.put("approvalStatus", approvalStatus);
-    Long approvalLeaderId = number(d.get("approvalLeaderId"));
-    d.put("approvalLeaderName", approvalLeaderId == null ? null : access.name(approvalLeaderId));
+    List<Map<String, Object>> approvalSteps = approval.steps(demandId);
+    d.put("approvalSteps", approvalSteps);
+    long approvalStep = number(d.get("approvalStep"));
+    d.put("approvalStep", approvalStep);
+    List<String> currentApprovers = new ArrayList<>();
+    for (Map<String, Object> step : approvalSteps) {
+      if (number(step.get("stepNo")) != approvalStep
+          || !"PENDING".equals(String.valueOf(step.get("status")))) continue;
+      Object value = step.get("approvers");
+      if (value instanceof List)
+        for (Object item : (List<?>) value)
+          if (item instanceof Map)
+            currentApprovers.add(String.valueOf(((Map<?, ?>) item).get("name")));
+    }
+    if (!currentApprovers.isEmpty()) d.put("approvalLeaderName", String.join("、", currentApprovers));
+    else {
+      Long approvalLeaderId = number(d.get("approvalLeaderId"));
+      d.put("approvalLeaderName", approvalLeaderId == null ? null : access.name(approvalLeaderId));
+    }
     d.put("canApprove", approval.canApprove(d, userId));
     boolean approvalBlocked = "PENDING".equals(approvalStatus) || "REJECTED".equals(approvalStatus);
     d.put("canViewTable", staff);
@@ -372,6 +406,10 @@ public class DemandWorkflow {
     checkRevision(d, revision);
     // 统一锁顺序：先需求，后公示。
     store.rows("SELECT id FROM rm_demand_publication WHERE demand_id=? FOR UPDATE", id);
+    store.update(
+        "DELETE FROM rm_demand_approval_approver WHERE step_id IN (SELECT id FROM rm_demand_approval_step WHERE demand_id=?)",
+        id);
+    store.update("DELETE FROM rm_demand_approval_step WHERE demand_id=?", id);
     store.update(
         "DELETE FROM rm_demand_read WHERE object_type='PUBLICATION' AND object_id IN (SELECT id FROM rm_demand_publication WHERE demand_id=?)",
         id);

@@ -2537,10 +2537,28 @@ class DemandWorkflowTest {
 
   private void setupLeader(long submitter, String deptKey, Long leader) {
     jdbc.update("INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(?,?)", submitter, deptKey);
+    jdbc.update("DELETE FROM rm_demand_dept_leader WHERE dept_key=?", deptKey);
+    if (leader != null)
+      jdbc.update(
+          "INSERT INTO rm_demand_dept_leader(dept_key,user_id,sort_no) VALUES(?,?,0)",
+          deptKey,
+          leader);
     jdbc.update("UPDATE rm_demand_dept SET leader_id=? WHERE dept_key=?", leader, deptKey);
   }
 
+  private void addLeader(String deptKey, Long leader, int sortNo) {
+    jdbc.update(
+        "INSERT INTO rm_demand_dept_leader(dept_key,user_id,sort_no) VALUES(?,?,?)",
+        deptKey,
+        leader,
+        sortNo);
+  }
+
   private void configureApproval(boolean required) {
+    configureApprovalMode(required ? "DIRECT" : "NONE");
+  }
+
+  private void configureApprovalMode(String mode) {
     Map<String, Object> form = store.one("SELECT revision FROM rm_demand_form WHERE form_key='A'");
     forms.configure(
         "A",
@@ -2561,8 +2579,10 @@ class DemandWorkflowTest {
             "DEFAULT",
             "requireMembers",
             false,
+            "approvalMode",
+            mode,
             "requiresLeaderApproval",
-            required),
+            !"NONE".equals(mode)),
         1L);
   }
 
@@ -2611,7 +2631,7 @@ class DemandWorkflowTest {
     assertEquals(
         1L,
         store.count(
-            "SELECT COUNT(*) FROM rm_demand_message WHERE demand_id=? AND kind='EVENT' AND content LIKE '%部门主管通过审批%'",
+            "SELECT COUNT(*) FROM rm_demand_message WHERE demand_id=? AND kind='EVENT' AND content LIKE '%审批完成%'",
             id));
   }
 
@@ -2665,6 +2685,8 @@ class DemandWorkflowTest {
             .one("SELECT approval_status FROM rm_demand WHERE id=?", create(9130, 10L, false))
             .get("approvalStatus"));
     jdbc.update("UPDATE rm_demand_dept SET leader_id=20 WHERE dept_key='D1'");
+    jdbc.update("DELETE FROM rm_demand_dept_leader WHERE dept_key='D1'");
+    jdbc.update("INSERT INTO rm_demand_dept_leader(dept_key,user_id,sort_no) VALUES('D1',20,0)");
     jdbc.update("UPDATE ac_user SET deleted=TRUE WHERE id=20");
     assertEquals(
         "NONE",
@@ -2743,5 +2765,148 @@ class DemandWorkflowTest {
     assertEquals("PENDING", submitterDetail.get("approvalStatus"));
     assertFalse(flag(submitterDetail.get("canFollowUp")));
     assertThrows(BaseException.class, () -> workflow.detail(id, 60L, null));
+  }
+
+  @Test
+  void multipleLeadersAnyOneApproves() {
+    setupLeader(10L, "D2", 20L);
+    addLeader("D2", 30L, 1);
+    configureApprovalMode("DIRECT");
+    String id = create(9200, 10L, false);
+    assertEquals(1L, countNotice(20L, DemandNotices.APPROVAL));
+    assertEquals(1L, countNotice(30L, DemandNotices.APPROVAL));
+    assertTrue(flag(workflow.detail(id, 30L, null).get("canApprove")));
+    approval.decide(
+        id, body("decision", "APPROVE", "comment", "同意", "revision", revision(id)), 20L);
+    assertEquals(
+        "APPROVED",
+        store.one("SELECT approval_status FROM rm_demand WHERE id=?", id).get("approvalStatus"));
+    assertThrows(
+        BaseException.class,
+        () ->
+            approval.decide(
+                id, body("decision", "APPROVE", "revision", revision(id)), 30L));
+    assertEquals(0L, number(access.capabilities(30L).get("approvalPending")));
+    assertEquals(0L, notices.unread(30L));
+    assertEquals(0, listScope(30L, "approval").size());
+  }
+
+  @Test
+  void hierarchyApprovesLevelByLevelAndKeepsAggregatePending() {
+    setupLeader(10L, "D2", 30L);
+    addLeader("D1", 20L, 0);
+    configureApprovalMode("HIERARCHY");
+    String id = create(9210, 10L, false);
+    Map<String, Object> demand =
+        store.one("SELECT approval_status,approval_step FROM rm_demand WHERE id=?", id);
+    assertEquals("PENDING", demand.get("approvalStatus"));
+    assertEquals(1L, number(demand.get("approvalStep")));
+    assertEquals(1L, countNotice(30L, DemandNotices.APPROVAL));
+    assertEquals(0L, countNotice(20L, DemandNotices.APPROVAL));
+    assertEquals(1, listScope(30L, "approval").size());
+    assertTrue(listScope(50L, "pending").isEmpty());
+    approval.decide(
+        id, body("decision", "APPROVE", "comment", "组内同意", "revision", revision(id)), 30L);
+    demand = store.one("SELECT approval_status,approval_step FROM rm_demand WHERE id=?", id);
+    assertEquals("PENDING", demand.get("approvalStatus"));
+    assertEquals(2L, number(demand.get("approvalStep")));
+    assertEquals(1L, countNotice(20L, DemandNotices.APPROVAL));
+    assertEquals(1, listScope(20L, "approval").size());
+    assertTrue(listScope(50L, "pending").isEmpty());
+    assertEquals(0L, countNotice(50L, DemandNotices.NEW_DEMAND));
+    approval.decide(
+        id, body("decision", "APPROVE", "comment", "部门同意", "revision", revision(id)), 20L);
+    assertEquals(
+        "APPROVED",
+        store.one("SELECT approval_status FROM rm_demand WHERE id=?", id).get("approvalStatus"));
+    assertEquals(1L, countNotice(10L, DemandNotices.APPROVAL_RESULT));
+    assertEquals(1L, countNotice(50L, DemandNotices.NEW_DEMAND));
+    List<Map<String, Object>> steps = (List<Map<String, Object>>) workflow.detail(id, 10L, null).get("approvalSteps");
+    assertEquals(2, steps.size());
+    assertEquals("APPROVED", steps.get(0).get("status"));
+    assertEquals("APPROVED", steps.get(1).get("status"));
+    assertEquals("人员30", steps.get(0).get("actedByName"));
+    assertEquals("组内同意", steps.get(0).get("comment"));
+    assertEquals(1, ((List<?>) steps.get(0).get("approvers")).size());
+  }
+
+  @Test
+  void hierarchySkipsDepartmentWithoutLeader() {
+    jdbc.update("INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(10,'D2')");
+    addLeader("D1", 20L, 0);
+    configureApprovalMode("HIERARCHY");
+    String id = create(9220, 10L, false);
+    Map<String, Object> demand =
+        store.one("SELECT approval_status,approval_step FROM rm_demand WHERE id=?", id);
+    assertEquals("PENDING", demand.get("approvalStatus"));
+    assertEquals(1L, number(demand.get("approvalStep")));
+    assertEquals(1L, countNotice(20L, DemandNotices.APPROVAL));
+    approval.decide(id, body("decision", "APPROVE", "revision", revision(id)), 20L);
+    assertEquals(
+        "APPROVED",
+        store.one("SELECT approval_status FROM rm_demand WHERE id=?", id).get("approvalStatus"));
+  }
+
+  @Test
+  void hierarchyRejectAtSecondLevelCancelsRemaining() {
+    setupLeader(10L, "D2", 30L);
+    addLeader("D1", 20L, 0);
+    configureApprovalMode("HIERARCHY");
+    String id = create(9230, 10L, false);
+    approval.decide(
+        id, body("decision", "APPROVE", "revision", revision(id)), 30L);
+    approval.decide(
+        id,
+        body("decision", "REJECT", "comment", "部门驳回", "revision", revision(id)),
+        20L);
+    assertEquals(
+        "REJECTED",
+        store.one("SELECT approval_status FROM rm_demand WHERE id=?", id).get("approvalStatus"));
+    assertEquals(1L, countNotice(10L, DemandNotices.APPROVAL_RESULT));
+    assertEquals(0L, countNotice(50L, DemandNotices.NEW_DEMAND));
+    List<Map<String, Object>> steps =
+        (List<Map<String, Object>>) workflow.detail(id, 10L, null).get("approvalSteps");
+    assertEquals("APPROVED", steps.get(0).get("status"));
+    assertEquals("REJECTED", steps.get(1).get("status"));
+  }
+
+  @Test
+  void selfLeaderLevelIsSkippedToParent() {
+    setupLeader(10L, "D2", 10L);
+    addLeader("D1", 20L, 0);
+    configureApprovalMode("HIERARCHY");
+    String id = create(9240, 10L, false);
+    assertEquals(0L, countNotice(10L, DemandNotices.APPROVAL));
+    assertEquals(1L, countNotice(20L, DemandNotices.APPROVAL));
+    approval.decide(id, body("decision", "APPROVE", "revision", revision(id)), 20L);
+    assertEquals(
+        "APPROVED",
+        store.one("SELECT approval_status FROM rm_demand WHERE id=?", id).get("approvalStatus"));
+  }
+
+  @Test
+  void directModeDoesNotClimbToParent() {
+    jdbc.update("INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(10,'D2')");
+    addLeader("D1", 20L, 0);
+    configureApprovalMode("DIRECT");
+    String id = create(9250, 10L, false);
+    assertEquals(
+        "NONE",
+        store.one("SELECT approval_status FROM rm_demand WHERE id=?", id).get("approvalStatus"));
+    assertEquals(0L, countNotice(20L, DemandNotices.APPROVAL));
+    assertEquals(1L, countNotice(50L, DemandNotices.NEW_DEMAND));
+  }
+
+  @Test
+  void multipleDepartmentsPickFirstWithLeader() {
+    jdbc.update("INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(10,'D2'),(10,'D3')");
+    addLeader("D3", 30L, 0);
+    configureApprovalMode("DIRECT");
+    String id = create(9260, 10L, false);
+    assertEquals(
+        "PENDING",
+        store.one("SELECT approval_status FROM rm_demand WHERE id=?", id).get("approvalStatus"));
+    assertEquals(1L, countNotice(30L, DemandNotices.APPROVAL));
+    approval.decide(id, body("decision", "APPROVE", "revision", revision(id)), 30L);
   }
 }

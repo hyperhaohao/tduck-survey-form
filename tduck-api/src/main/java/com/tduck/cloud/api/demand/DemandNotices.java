@@ -58,7 +58,7 @@ public class DemandNotices {
     pageArgs.add((current - 1) * limit);
     List<Map<String, Object>> rows =
         store.rows(
-            "SELECT id,kind,form_key,demand_id,publication_id,round_no,title,content,read_at,create_time"
+            "SELECT id,kind,form_key,demand_id,publication_id,round_no,step_no,title,content,read_at,create_time"
                 + " FROM rm_demand_notice"
                 + where
                 + " ORDER BY create_time DESC,id DESC LIMIT ? OFFSET ?",
@@ -237,7 +237,48 @@ public class DemandNotices {
     }
   }
 
-  /** 提交待部门主管审批：通知审批人。 */
+  /** 提交待部门主管审批：通知当前级全部候选人，按级去重。 */
+  public void approvalTask(
+      Map<String, Object> demand, int stepNo, String deptName, List<Map<String, Object>> approvers) {
+    try {
+      String demandId = str(demand.get("id"));
+      String title = "有新的需求待您审批";
+      String content =
+          clip(
+              str(demand.get("title"))
+                  + (deptName == null || deptName.isEmpty()
+                      ? ""
+                      : " · 第" + stepNo + "级 " + deptName),
+              1000);
+      for (Map<String, Object> approver : approvers) {
+        Long userId = number(approver.get("userId"));
+        if (userId == null) continue;
+        if (store.count("SELECT COUNT(*) FROM ac_user WHERE id=? AND deleted=FALSE", userId) == 0)
+          continue;
+        if (store.count(
+                "SELECT COUNT(*) FROM rm_demand_notice WHERE user_id=? AND kind=? AND demand_id=? AND step_no=?",
+                userId,
+                APPROVAL,
+                demandId,
+                stepNo)
+            > 0) continue;
+        insertWithStep(
+            userId,
+            APPROVAL,
+            str(demand.get("formKey")),
+            demandId,
+            null,
+            null,
+            stepNo,
+            title,
+            content);
+      }
+    } catch (Exception error) {
+      log.warn("审批任务消息失败：{}", demand.get("id"), error);
+    }
+  }
+
+  /** 旧单级兼容：无步骤号。 */
   public void approvalTask(Map<String, Object> demand, Long leaderId) {
     try {
       if (leaderId == null) return;
@@ -260,6 +301,16 @@ public class DemandNotices {
     } catch (Exception error) {
       log.warn("审批任务消息失败：{}", demand.get("id"), error);
     }
+  }
+
+  /** 当前级处理完成后，把该级全部待审批消息置为已读（含操作人）。 */
+  public void readApprovalStep(String demandId, int stepNo) {
+    if (demandId == null) return;
+    store.update(
+        "UPDATE rm_demand_notice SET read_at=CURRENT_TIMESTAMP WHERE kind=? AND demand_id=? AND step_no=? AND read_at IS NULL",
+        APPROVAL,
+        demandId,
+        stepNo);
   }
 
   /** 审批结果：通知填报人。 */
@@ -378,6 +429,32 @@ public class DemandNotices {
         emptyToNull(demandId),
         emptyToNull(publicationId),
         roundNo,
+        clip(title, 200),
+        clip(content, 1000));
+  }
+
+  private void insertWithStep(
+      Long userId,
+      String kind,
+      String formKey,
+      String demandId,
+      String publicationId,
+      Integer roundNo,
+      Integer stepNo,
+      String title,
+      String content) {
+    if (userId == null) return;
+    store.update(
+        "INSERT INTO rm_demand_notice(id,user_id,kind,form_key,demand_id,publication_id,round_no,step_no,title,content)"
+            + " VALUES(?,?,?,?,?,?,?,?,?,?)",
+        id(),
+        userId,
+        kind,
+        emptyToNull(formKey),
+        emptyToNull(demandId),
+        emptyToNull(publicationId),
+        roundNo,
+        stepNo,
         clip(title, 200),
         clip(content, 1000));
   }

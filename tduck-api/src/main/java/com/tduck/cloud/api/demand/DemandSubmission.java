@@ -87,6 +87,18 @@ public class DemandSubmission {
     receipt.put("anonymous", anonymous);
     receipt.put("queryCode", queryCode);
     receipt.put("approvalPending", approvalPending);
+    Map<String, Object> form = access.form(entity.getFormKey());
+    String approvalMode =
+        form == null
+            ? DemandApproval.NONE
+            : String.valueOf(form.getOrDefault("approvalMode", DemandApproval.NONE));
+    if (!DemandApproval.DIRECT.equals(approvalMode)
+        && !DemandApproval.HIERARCHY.equals(approvalMode))
+      approvalMode =
+          form != null && flag(form.get("requiresLeaderApproval"))
+              ? DemandApproval.DIRECT
+              : DemandApproval.NONE;
+    receipt.put("approvalMode", approvalMode);
     result.put("demandReceipt", receipt);
   }
 }

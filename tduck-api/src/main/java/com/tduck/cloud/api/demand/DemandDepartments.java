@@ -18,14 +18,17 @@ public class DemandDepartments {
   /** 可授权部门列表，成员数包含下级部门。 */
   public List<Map<String, Object>> list(Long userId) {
     access.requireDocumentManager(userId);
-    return store.rows(
-        "SELECT d.dept_key,d.name,d.parent_key,d.path,d.sort_no,d.leader_id,"
-            + "(SELECT u.name FROM ac_user u WHERE u.id=d.leader_id AND u.deleted=FALSE) AS leader_name,"
-            + "(SELECT COUNT(DISTINCT ud.user_id) FROM rm_demand_user_dept ud "
-            + "JOIN ac_user u ON u.id=ud.user_id AND u.deleted=FALSE "
-            + "JOIN rm_demand_dept pd ON pd.dept_key=ud.dept_key AND pd.active=TRUE "
-            + "WHERE pd.path=d.path OR LOCATE(CONCAT(d.path,'/'),pd.path)=1) AS member_count "
-            + "FROM rm_demand_dept d WHERE d.active=TRUE ORDER BY d.sort_no,d.name");
+    List<Map<String, Object>> rows =
+        store.rows(
+            "SELECT d.dept_key,d.name,d.parent_key,d.path,d.sort_no,d.leader_id,"
+                + "(SELECT u.name FROM ac_user u WHERE u.id=d.leader_id AND u.deleted=FALSE) AS leader_name,"
+                + "(SELECT COUNT(DISTINCT ud.user_id) FROM rm_demand_user_dept ud "
+                + "JOIN ac_user u ON u.id=ud.user_id AND u.deleted=FALSE "
+                + "JOIN rm_demand_dept pd ON pd.dept_key=ud.dept_key AND pd.active=TRUE "
+                + "WHERE pd.path=d.path OR LOCATE(CONCAT(d.path,'/'),pd.path)=1) AS member_count "
+                + "FROM rm_demand_dept d WHERE d.active=TRUE ORDER BY d.sort_no,d.name");
+    attachLeaders(rows);
+    return rows;
   }
 
   /** 部门成员名册：每个有效部门一条记录；未归属任何有效部门的成员 deptKey 为空。 */
@@ -46,8 +49,11 @@ public class DemandDepartments {
     String parentKey = text(body.get("parentKey"));
     if (parentKey != null) requireActiveDepartment(parentKey);
     requireSiblingNameFree(parentKey, name, null);
-    Long leaderId = leaderId(body.get("leaderId"));
-    if (leaderId != null) requireActiveUser(leaderId);
+    List<Long> leaders =
+        body.containsKey("leaderIds")
+            ? parseLeaderIds(body.get("leaderIds"))
+            : parseLeaderIds(body.get("leaderId"));
+    for (Long leaderId : leaders) requireActiveUser(leaderId);
     String deptKey =
         "D" + UUID.randomUUID().toString().replace("-", "").substring(0, 10).toUpperCase(Locale.ROOT);
     store.update(
@@ -57,20 +63,26 @@ public class DemandDepartments {
         parentKey,
         "/" + deptKey,
         integer(body.get("sortNo")),
-        leaderId);
+        leaders.isEmpty() ? null : leaders.get(0));
     rebuildPaths();
-    if (leaderId != null && store.count(
-            "SELECT COUNT(*) FROM rm_demand_user_dept WHERE user_id=? AND dept_key=?",
-            leaderId,
-            deptKey)
-        == 0)
+    store.update("DELETE FROM rm_demand_dept_leader WHERE dept_key=?", deptKey);
+    int leaderSort = 0;
+    for (Long leaderId : leaders) {
       store.update(
-          "INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(?,?)", leaderId, deptKey);
-    return store.one(
-        "SELECT d.dept_key,d.name,d.parent_key,d.path,d.sort_no,d.leader_id,"
-            + "(SELECT u.name FROM ac_user u WHERE u.id=d.leader_id AND u.deleted=FALSE) AS leader_name "
-            + "FROM rm_demand_dept d WHERE d.dept_key=?",
-        deptKey);
+          "INSERT INTO rm_demand_dept_leader(dept_key,user_id,sort_no,created_by) VALUES(?,?,?,?)",
+          deptKey,
+          leaderId,
+          leaderSort++,
+          userId);
+      if (store.count(
+              "SELECT COUNT(*) FROM rm_demand_user_dept WHERE user_id=? AND dept_key=?",
+              leaderId,
+              deptKey)
+          == 0)
+        store.update(
+            "INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(?,?)", leaderId, deptKey);
+    }
+    return deptWithLeaders(deptKey);
   }
 
   /** 修改部门名称、上级、排序或主管。 */
@@ -94,10 +106,14 @@ public class DemandDepartments {
         body.containsKey("sortNo")
             ? integer(body.get("sortNo"))
             : integer(department.get("sortNo"));
-    Long leaderId =
-        body.containsKey("leaderId")
-            ? leaderId(body.get("leaderId"))
-            : number(department.get("leaderId"));
+    boolean replaceLeaders = body.containsKey("leaderIds") || body.containsKey("leaderId");
+    List<Long> leaders =
+        replaceLeaders
+            ? (body.containsKey("leaderIds")
+                ? parseLeaderIds(body.get("leaderIds"))
+                : parseLeaderIds(body.get("leaderId")))
+            : currentLeaders(deptKey, department.get("leaderId"));
+    if (replaceLeaders) for (Long leaderId : leaders) requireDepartmentLeader(deptKey, leaderId);
     if (parentKey != null) {
       requireActiveDepartment(parentKey);
       if (parentKey.equals(deptKey)) throw new BaseException("不能把部门设置为自己的下级");
@@ -112,14 +128,15 @@ public class DemandDepartments {
       }
     }
     requireSiblingNameFree(parentKey, name, deptKey);
-    if (leaderId != null) requireDepartmentLeader(deptKey, leaderId);
+    Long firstLeader = leaders.isEmpty() ? null : leaders.get(0);
     store.update(
         "UPDATE rm_demand_dept SET name=?,parent_key=?,sort_no=?,leader_id=? WHERE dept_key=?",
         name,
         parentKey,
         sortNo,
-        leaderId,
+        firstLeader,
         deptKey);
+    if (replaceLeaders) replaceLeaders(deptKey, leaders, userId);
     rebuildPaths();
   }
 
@@ -137,6 +154,7 @@ public class DemandDepartments {
       throw new BaseException("请先移除该部门的成员");
     if (store.count("SELECT COUNT(*) FROM rm_demand_acl_dept WHERE dept_key=?", deptKey) > 0)
       throw new BaseException("该部门仍有收集单授权，请先移除授权");
+    store.update("DELETE FROM rm_demand_dept_leader WHERE dept_key=?", deptKey);
     store.update("DELETE FROM rm_demand_dept WHERE dept_key=?", deptKey);
     rebuildPaths();
   }
@@ -180,6 +198,120 @@ public class DemandDepartments {
     for (String deptKey : deptKeys)
       store.update(
           "INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(?,?)", memberId, deptKey);
+  }
+
+  private List<Long> parseLeaderIds(Object value) {
+    List<Long> ids = new ArrayList<>();
+    if (value instanceof Collection) {
+      for (Object item : (Collection<?>) value) {
+        if (item == null) continue;
+        String text = item.toString().trim();
+        if (text.isEmpty()) continue;
+        Long id;
+        try {
+          id = Long.valueOf(text);
+        } catch (NumberFormatException error) {
+          throw new BaseException("主管成员无效");
+        }
+        if (!ids.contains(id)) ids.add(id);
+      }
+    } else if (value != null) {
+      String text = value.toString().trim();
+      if (!text.isEmpty()) {
+        try {
+          ids.add(Long.valueOf(text));
+        } catch (NumberFormatException error) {
+          throw new BaseException("主管成员无效");
+        }
+      }
+    }
+    return ids;
+  }
+
+  private List<Long> currentLeaders(String deptKey, Object legacyLeaderId) {
+    List<Long> ids = new ArrayList<>();
+    for (Map<String, Object> row : leaders(deptKey)) add(ids, row.get("userId"));
+    if (ids.isEmpty() && legacyLeaderId != null) ids.add(number(legacyLeaderId));
+    return ids;
+  }
+
+  private void replaceLeaders(String deptKey, List<Long> leaders, Long operator) {
+    store.update("DELETE FROM rm_demand_dept_leader WHERE dept_key=?", deptKey);
+    int sortNo = 0;
+    for (Long leaderId : leaders)
+      store.update(
+          "INSERT INTO rm_demand_dept_leader(dept_key,user_id,sort_no,created_by) VALUES(?,?,?,?)",
+          deptKey,
+          leaderId,
+          sortNo++,
+          operator);
+  }
+
+  /** 读取部门全部有效主管。 */
+  List<Map<String, Object>> leaders(String deptKey) {
+    return store.rows(
+        "SELECT l.user_id,u.name FROM rm_demand_dept_leader l "
+            + "JOIN ac_user u ON u.id=l.user_id AND u.deleted=FALSE "
+            + "WHERE l.dept_key=? ORDER BY l.sort_no,u.name,l.user_id",
+        deptKey);
+  }
+
+  private Map<String, Object> deptWithLeaders(String deptKey) {
+    Map<String, Object> row =
+        store.one(
+            "SELECT d.dept_key,d.name,d.parent_key,d.path,d.sort_no,d.leader_id,"
+                + "(SELECT u.name FROM ac_user u WHERE u.id=d.leader_id AND u.deleted=FALSE) AS leader_name "
+                + "FROM rm_demand_dept d WHERE d.dept_key=?",
+            deptKey);
+    if (row != null) attachLeaders(Collections.singletonList(row));
+    return row;
+  }
+
+  /** 批量附加多主管字段，兼容 leaderId/leaderName。 */
+  private void attachLeaders(List<Map<String, Object>> rows) {
+    if (rows == null || rows.isEmpty()) return;
+    List<String> keys = new ArrayList<>();
+    for (Map<String, Object> row : rows) keys.add(String.valueOf(row.get("deptKey")));
+    StringBuilder placeholders = new StringBuilder();
+    for (int i = 0; i < keys.size(); i++) {
+      if (i > 0) placeholders.append(',');
+      placeholders.append('?');
+    }
+    List<Map<String, Object>> leaderRows =
+        store.rows(
+            "SELECT l.dept_key,l.user_id,u.name FROM rm_demand_dept_leader l "
+                + "JOIN ac_user u ON u.id=l.user_id AND u.deleted=FALSE "
+                + "WHERE l.dept_key IN ("
+                + placeholders
+                + ") ORDER BY l.dept_key,l.sort_no,u.name,l.user_id",
+            keys.toArray());
+    Map<String, List<Map<String, Object>>> byDept = new LinkedHashMap<>();
+    for (Map<String, Object> row : leaderRows)
+      byDept
+          .computeIfAbsent(String.valueOf(row.get("deptKey")), k -> new ArrayList<>())
+          .add(row);
+    for (Map<String, Object> row : rows) {
+      List<Map<String, Object>> leaders =
+          byDept.getOrDefault(String.valueOf(row.get("deptKey")), Collections.emptyList());
+      List<Object> ids = new ArrayList<>();
+      List<String> names = new ArrayList<>();
+      for (Map<String, Object> leader : leaders) {
+        ids.add(leader.get("userId"));
+        names.add(String.valueOf(leader.get("name")));
+      }
+      row.put("leaders", leaders);
+      row.put("leaderIds", ids);
+      row.put("leaderNames", names);
+      if (!leaders.isEmpty()) {
+        row.put("leaderId", leaders.get(0).get("userId"));
+        row.put("leaderName", leaders.get(0).get("name"));
+      }
+    }
+  }
+
+  private void add(List<Long> ids, Object value) {
+    Long id = number(value);
+    if (id != null && !ids.contains(id)) ids.add(id);
   }
 
   private void requireActiveDepartment(String deptKey) {

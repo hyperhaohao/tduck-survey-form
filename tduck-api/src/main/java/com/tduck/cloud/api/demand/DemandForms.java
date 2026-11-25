@@ -26,7 +26,7 @@ public class DemandForms {
     boolean global = access.globalAdmin(userId);
     StringBuilder sql =
         new StringBuilder(
-            "SELECT f.form_key,f.name,f.description,f.status,c.summary,c.visibility,c.collect_only,c.allow_anonymous,c.published,c.end_time,c.voided,c.revision,c.sort_no,c.round_mode,c.round_period,c.round_no,c.round_start_time,c.round_end_time,c.reminder_mode,c.require_members,c.requires_leader_approval,(SELECT COUNT(*) FROM rm_demand d WHERE d.form_key=f.form_key) AS demand_count FROM fm_user_form f "
+            "SELECT f.form_key,f.name,f.description,f.status,c.summary,c.visibility,c.collect_only,c.allow_anonymous,c.published,c.end_time,c.voided,c.revision,c.sort_no,c.round_mode,c.round_period,c.round_no,c.round_start_time,c.round_end_time,c.reminder_mode,c.require_members,c.requires_leader_approval,c.approval_mode,(SELECT COUNT(*) FROM rm_demand d WHERE d.form_key=f.form_key) AS demand_count FROM fm_user_form f "
                 + (management ? "LEFT" : "INNER")
                 + " JOIN rm_demand_form c ON c.form_key=f.form_key WHERE f.is_deleted=FALSE AND (f.is_folder=FALSE OR f.is_folder IS NULL)");
     List<Object> args = new ArrayList<>();
@@ -66,6 +66,9 @@ public class DemandForms {
       String key = String.valueOf(row.get("formKey"));
       boolean login = "LOGIN".equals(String.valueOf(row.get("visibility")));
       row.put("collectOnly", flag(row.get("collectOnly")));
+      String approvalMode = modeOf(row);
+      row.put("approvalMode", approvalMode);
+      row.put("requiresLeaderApproval", !DemandApproval.NONE.equals(approvalMode));
       row.put("canFill", userId != null && (login || grants.canFill(key)));
       row.put("canHandle", userId != null && (globalAdmin || grants.canHandle(key)));
       row.put("canManage", userId != null && (globalAdmin || grants.canManage(key)));
@@ -83,6 +86,9 @@ public class DemandForms {
     Map<String, Object> form = access.form(key);
     if (form == null) return Collections.singletonMap("managed", false);
     form = rounds.advanceIfExpired(form);
+    String approvalMode = modeOf(form);
+    form.put("approvalMode", approvalMode);
+    form.put("requiresLeaderApproval", !DemandApproval.NONE.equals(approvalMode));
     boolean deleted =
         store.count("SELECT COUNT(*) FROM fm_user_form WHERE form_key=? AND is_deleted=FALSE", key)
             == 0;
@@ -99,6 +105,8 @@ public class DemandForms {
               && flag(form.get("allowAnonymous"))
               && "LOGIN".equals(form.get("visibility")));
       gate.put("collectOnly", !deleted && flag(form.get("collectOnly")));
+      gate.put("approvalMode", approvalMode);
+      gate.put("requiresLeaderApproval", !DemandApproval.NONE.equals(approvalMode));
       gate.put("roundMode", DemandRounds.str(form.get("roundMode")));
       gate.put("roundEndTime", form.get("roundEndTime"));
       return gate;
@@ -132,10 +140,22 @@ public class DemandForms {
     String visibility = String.valueOf(body.getOrDefault("visibility", "LOGIN"));
     if (!Arrays.asList("LOGIN", "SELECTED").contains(visibility)) throw new BaseException("填报范围无效");
     boolean anonymous = flag(body.get("allowAnonymous"));
-    boolean requiresLeaderApproval =
-        body.containsKey("requiresLeaderApproval")
-            ? flag(body.get("requiresLeaderApproval"))
-            : old != null && flag(old.get("requiresLeaderApproval"));
+    String approvalMode;
+    if (body.containsKey("approvalMode")) {
+      approvalMode = normalizeMode(body.get("approvalMode"));
+    } else if (body.containsKey("requiresLeaderApproval")) {
+      boolean requested = flag(body.get("requiresLeaderApproval"));
+      String current = old == null ? DemandApproval.NONE : modeOf(old);
+      approvalMode =
+          requested
+              ? (DemandApproval.HIERARCHY.equals(current)
+                  ? DemandApproval.HIERARCHY
+                  : DemandApproval.DIRECT)
+              : DemandApproval.NONE;
+    } else {
+      approvalMode = old == null ? DemandApproval.NONE : modeOf(old);
+    }
+    boolean requiresLeaderApproval = !DemandApproval.NONE.equals(approvalMode);
     if (requiresLeaderApproval) anonymous = false;
     if (anonymous && !"LOGIN".equals(visibility)) throw new BaseException("指定人员收集单不能开放匿名填写");
     String summary = body.get("summary") == null ? "" : body.get("summary").toString();
@@ -206,7 +226,7 @@ public class DemandForms {
       long sortNo =
           next == null || next.get("nextSort") == null ? 0 : number(next.get("nextSort"));
       store.update(
-          "INSERT INTO rm_demand_form(form_key,summary,visibility,allow_anonymous,published,end_time,sort_no,collect_only,round_mode,round_period,round_no,round_start_time,round_end_time,reminder_mode,require_members,requires_leader_approval) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          "INSERT INTO rm_demand_form(form_key,summary,visibility,allow_anonymous,published,end_time,sort_no,collect_only,round_mode,round_period,round_no,round_start_time,round_end_time,reminder_mode,require_members,requires_leader_approval,approval_mode) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
           key,
           summary,
           visibility,
@@ -222,13 +242,14 @@ public class DemandForms {
           roundEnd,
           reminderMode,
           requireMembers,
-          requiresLeaderApproval);
+          requiresLeaderApproval,
+          approvalMode);
       grantCreatorManager(key);
     } else {
       long revision = Long.parseLong(String.valueOf(body.getOrDefault("revision", -1)));
       if (revision != number(old.get("revision"))) throw new BaseException("配置已变化，请刷新后重试", 409);
       store.update(
-          "UPDATE rm_demand_form SET summary=?,visibility=?,allow_anonymous=?,published=?,end_time=?,collect_only=?,round_mode=?,round_period=?,round_no=?,round_start_time=?,round_end_time=?,reminder_mode=?,require_members=?,requires_leader_approval=?,revision=revision+1 WHERE form_key=?",
+          "UPDATE rm_demand_form SET summary=?,visibility=?,allow_anonymous=?,published=?,end_time=?,collect_only=?,round_mode=?,round_period=?,round_no=?,round_start_time=?,round_end_time=?,reminder_mode=?,require_members=?,requires_leader_approval=?,approval_mode=?,revision=revision+1 WHERE form_key=?",
           summary,
           visibility,
           anonymous,
@@ -243,6 +264,7 @@ public class DemandForms {
           reminderMode,
           requireMembers,
           requiresLeaderApproval,
+          approvalMode,
           key);
       if (!access.hasOtherManager(key, null, null)) grantCreatorManager(key);
     }
@@ -271,6 +293,30 @@ public class DemandForms {
     row.put("roundEndTime", source.get("roundEndTime"));
     row.put("reminderMode", source.get("reminderMode"));
     row.put("requireMembers", source.get("requireMembers"));
+  }
+
+  /** 新审批模式优先；旧布尔列在没有模式时回退 DIRECT。 */
+  private static String modeOf(Map<String, Object> row) {
+    String value =
+        row.get("approvalMode") == null
+            ? ""
+            : row.get("approvalMode").toString().trim().toUpperCase(Locale.ROOT);
+    if (DemandApproval.DIRECT.equals(value) || DemandApproval.HIERARCHY.equals(value))
+      return value;
+    if (DemandApproval.NONE.equals(value) && !flag(row.get("requiresLeaderApproval")))
+      return value;
+    return flag(row.get("requiresLeaderApproval"))
+        ? DemandApproval.DIRECT
+        : DemandApproval.NONE;
+  }
+
+  private static String normalizeMode(Object value) {
+    String mode =
+        value == null ? "" : value.toString().trim().toUpperCase(Locale.ROOT);
+    if (DemandApproval.NONE.equals(mode)
+        || DemandApproval.DIRECT.equals(mode)
+        || DemandApproval.HIERARCHY.equals(mode)) return mode;
+    throw new BaseException("审批模式无效");
   }
   /** 全局管理员保存首页收集单全局顺序；未出现在请求中的收集单保持原位。 */
   @Transactional
@@ -374,6 +420,12 @@ public class DemandForms {
     long data = store.count("SELECT COUNT(*) FROM fm_user_form_data WHERE form_key=?", key);
     if (demands > 0 || data > 0)
       throw new BaseException("该收集单已有需求或答卷，不能彻底删除；请保留在回收站或先作废", 409);
+    store.update(
+        "DELETE FROM rm_demand_approval_approver WHERE step_id IN (SELECT id FROM rm_demand_approval_step WHERE demand_id IN (SELECT id FROM rm_demand WHERE form_key=?))",
+        key);
+    store.update(
+        "DELETE FROM rm_demand_approval_step WHERE demand_id IN (SELECT id FROM rm_demand WHERE form_key=?)",
+        key);
     for (String table :
         Arrays.asList(
             "fm_user_form_item",

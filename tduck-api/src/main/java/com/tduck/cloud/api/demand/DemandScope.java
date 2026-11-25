@@ -33,7 +33,12 @@ final class DemandScope {
         where.append(")");
       }
     } else if ("approval".equals(scope)) {
-      where.append(" AND d.approval_status='PENDING' AND d.approval_leader_id=?");
+      where.append(
+          " AND d.approval_status='PENDING' AND (EXISTS(SELECT 1 FROM rm_demand_approval_step s "
+              + "JOIN rm_demand_approval_approver a ON a.step_id=s.id WHERE s.demand_id=d.id "
+              + "AND s.status='PENDING' AND a.user_id=?) OR (d.approval_leader_id=? AND "
+              + "NOT EXISTS(SELECT 1 FROM rm_demand_approval_step s2 WHERE s2.demand_id=d.id)))");
+      args.add(userId);
       args.add(userId);
     } else throw new BaseException("列表类型无效");
   }

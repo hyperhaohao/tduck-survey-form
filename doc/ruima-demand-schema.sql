@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS rm_demand_form (
  round_mode VARCHAR(16) NOT NULL DEFAULT 'NONE', round_period VARCHAR(16) NULL, round_no INT NOT NULL DEFAULT 0,
  round_start_time TIMESTAMP NULL, round_end_time TIMESTAMP NULL,
  reminder_mode VARCHAR(16) NOT NULL DEFAULT 'DEFAULT', require_members BOOLEAN NOT NULL DEFAULT FALSE,
- requires_leader_approval BOOLEAN NOT NULL DEFAULT FALSE
+ requires_leader_approval BOOLEAN NOT NULL DEFAULT FALSE, approval_mode VARCHAR(16) NOT NULL DEFAULT 'NONE'
 );
 CREATE TABLE IF NOT EXISTS rm_demand_acl (
  form_key VARCHAR(64) NOT NULL, user_id BIGINT NOT NULL, can_fill BOOLEAN NOT NULL DEFAULT FALSE,
@@ -22,6 +22,12 @@ CREATE TABLE IF NOT EXISTS rm_demand_dept (
 );
 CREATE INDEX idx_rm_demand_dept_parent ON rm_demand_dept(parent_key);
 CREATE INDEX idx_rm_demand_dept_path ON rm_demand_dept(path);
+CREATE TABLE IF NOT EXISTS rm_demand_dept_leader (
+ dept_key VARCHAR(64) NOT NULL, user_id BIGINT NOT NULL, sort_no INT NOT NULL DEFAULT 0,
+ created_by BIGINT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ PRIMARY KEY(dept_key,user_id)
+);
+CREATE INDEX idx_rm_dept_leader_user ON rm_demand_dept_leader(user_id);
 CREATE TABLE IF NOT EXISTS rm_demand_user_dept (
  user_id BIGINT NOT NULL, dept_key VARCHAR(64) NOT NULL,
  PRIMARY KEY(user_id,dept_key)
@@ -51,12 +57,26 @@ CREATE TABLE IF NOT EXISTS rm_demand (
  followup_at TIMESTAMP NULL,
  approval_status VARCHAR(16) NOT NULL DEFAULT 'NONE', approval_leader_id BIGINT NULL,
  approval_comment VARCHAR(2000) NULL, approval_at TIMESTAMP NULL,
+ approval_mode VARCHAR(16) NOT NULL DEFAULT 'NONE', approval_step INT NOT NULL DEFAULT 0,
  create_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
  update_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX idx_rm_demand_submitter ON rm_demand(submitter_id,create_time);
 CREATE INDEX idx_rm_demand_handler ON rm_demand(handler_id,decision,progress);
 CREATE INDEX idx_rm_demand_form ON rm_demand(form_key,create_time);
+CREATE TABLE IF NOT EXISTS rm_demand_approval_step (
+ id VARCHAR(36) PRIMARY KEY, demand_id VARCHAR(36) NOT NULL, step_no INT NOT NULL,
+ dept_key VARCHAR(64) NULL, dept_name VARCHAR(512) NULL, status VARCHAR(16) NOT NULL DEFAULT 'WAITING',
+ comment_text VARCHAR(2000) NULL, acted_by BIGINT NULL, acted_at TIMESTAMP NULL,
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(demand_id,step_no)
+);
+CREATE INDEX idx_rm_approval_step ON rm_demand_approval_step(demand_id,status);
+CREATE TABLE IF NOT EXISTS rm_demand_approval_approver (
+ step_id VARCHAR(36) NOT NULL, user_id BIGINT NOT NULL, user_name VARCHAR(100) NOT NULL,
+ PRIMARY KEY(step_id,user_id)
+);
+CREATE INDEX idx_rm_approval_approver_user ON rm_demand_approval_approver(user_id);
 CREATE TABLE IF NOT EXISTS rm_demand_message (
  id VARCHAR(36) PRIMARY KEY, demand_id VARCHAR(36) NOT NULL, author_id BIGINT NOT NULL,
  author_name VARCHAR(100) NOT NULL, kind VARCHAR(16) NOT NULL, content TEXT NOT NULL,
@@ -96,7 +116,7 @@ CREATE INDEX idx_required_form ON rm_demand_required(form_key);
 CREATE TABLE IF NOT EXISTS rm_demand_notice (
  id VARCHAR(36) PRIMARY KEY, user_id BIGINT NOT NULL, kind VARCHAR(24) NOT NULL,
  form_key VARCHAR(64) NULL, demand_id VARCHAR(36) NULL, publication_id VARCHAR(36) NULL,
- round_no INT NULL, title VARCHAR(200) NOT NULL, content VARCHAR(1000) NULL,
+ round_no INT NULL, step_no INT NULL, title VARCHAR(200) NOT NULL, content VARCHAR(1000) NULL,
  read_at TIMESTAMP NULL, create_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX idx_notice_user ON rm_demand_notice(user_id,create_time);

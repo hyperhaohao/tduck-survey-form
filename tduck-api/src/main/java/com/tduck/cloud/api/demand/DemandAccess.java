@@ -201,11 +201,17 @@ public class DemandAccess {
         && ((java.util.Date) form.get("roundEndTime")).getTime() < System.currentTimeMillis())
       throw new BaseException("本轮收集已截止");
     if (anonymous) {
-      if (flag(form.get("requiresLeaderApproval")))
+      if (approvalRequired(form))
         throw new BaseException("该收集单需部门主管审批，不允许匿名填写", 403);
       if (!flag(form.get("allowAnonymous")) || !"LOGIN".equals(form.get("visibility")))
         throw new BaseException("该收集单不允许匿名填写", 403);
     } else if (!canFill(form, userId)) throw new BaseException("请登录后使用有填报权限的账户填写", 403);
+  }
+
+  private boolean approvalRequired(Map<String, Object> form) {
+    if (flag(form.get("requiresLeaderApproval"))) return true;
+    String mode = form.get("approvalMode") == null ? "" : form.get("approvalMode").toString();
+    return "DIRECT".equalsIgnoreCase(mode) || "HIERARCHY".equalsIgnoreCase(mode);
   }
   /** 校验当前经办人，管理员身份不能代替经办分派。 */
   public void requireAssigned(Map<String, Object> demand, Long userId) {
@@ -321,14 +327,31 @@ public class DemandAccess {
       approvalPending =
           store.count(
               "SELECT COUNT(*) FROM rm_demand d JOIN fm_user_form f ON f.form_key=d.form_key AND f.is_deleted=FALSE"
-                  + " WHERE d.approval_status='PENDING' AND d.approval_leader_id=?",
+                  + " WHERE d.approval_status='PENDING' AND (EXISTS(SELECT 1 FROM rm_demand_approval_step s "
+                  + "JOIN rm_demand_approval_approver a ON a.step_id=s.id WHERE s.demand_id=d.id "
+                  + "AND s.status='PENDING' AND a.user_id=?) OR (d.approval_leader_id=? AND "
+                  + "NOT EXISTS(SELECT 1 FROM rm_demand_approval_step s2 WHERE s2.demand_id=d.id)))",
+              userId,
               userId);
     } catch (org.springframework.dao.DataAccessException error) {
       log.warn("审批字段尚未就绪，暂不返回待审批数");
     }
-    boolean departmentLeader =
-        store.count("SELECT COUNT(*) FROM rm_demand_dept WHERE leader_id=? AND active=TRUE", userId)
-            > 0;
+    boolean departmentLeader = false;
+    try {
+      departmentLeader =
+          store.count(
+                  "SELECT COUNT(*) FROM rm_demand_dept_leader l "
+                      + "JOIN rm_demand_dept d ON d.dept_key=l.dept_key AND d.active=TRUE "
+                      + "JOIN ac_user u ON u.id=l.user_id AND u.deleted=FALSE WHERE l.user_id=?",
+                  userId)
+              > 0;
+    } catch (org.springframework.dao.DataAccessException error) {
+      log.warn("多主管表尚未就绪，暂用单主管字段");
+    }
+    if (!departmentLeader)
+      departmentLeader =
+          store.count("SELECT COUNT(*) FROM rm_demand_dept WHERE leader_id=? AND active=TRUE", userId)
+              > 0;
     m.put("approvalPending", approvalPending);
     m.put("approver", departmentLeader || approvalPending > 0);
     return m;
