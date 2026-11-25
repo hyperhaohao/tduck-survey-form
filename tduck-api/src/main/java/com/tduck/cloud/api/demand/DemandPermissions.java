@@ -14,7 +14,7 @@ import org.springframework.dao.DataAccessException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-/** 平台能力点：单据管理、组织架构、用户管理；单据级权限仍由 rm_demand_acl 决定。 */
+/** 平台能力点：单据管理、用户管理（组织架构）；user.manage 为兼容旧授权保留但不再展示。 */
 @Service
 @RequiredArgsConstructor
 public class DemandPermissions {
@@ -115,8 +115,8 @@ public class DemandPermissions {
   public static List<Map<String, Object>> definitions() {
     List<Map<String, Object>> list = new ArrayList<>();
     list.add(definition(FORM_MANAGE, "单据管理", "进入单据管理页，可新建收集单、设计发布与使用 AI；数据范围仍按收集单授权"));
-    list.add(definition(ORG, "组织架构", "维护部门、成员、部门主管；可进入单据管理页的组织架构页签"));
-    list.add(definition(USER_MANAGE, "用户管理", "进入用户管理页，查看、新增、编辑、停用用户；不含重置密码"));
+    list.add(definition(ORG, "用户管理", "维护部门、成员与部门主管；进入用户管理页（原组织架构）"));
+    // user.manage 为旧授权兼容保留，前端授权矩阵不再展示。
     return list;
   }
 

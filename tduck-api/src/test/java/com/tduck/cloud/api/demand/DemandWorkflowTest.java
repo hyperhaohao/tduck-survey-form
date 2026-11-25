@@ -1118,7 +1118,7 @@ class DemandWorkflowTest {
     permissions.replace(
         60L, Arrays.asList(DemandPermissions.FORM_MANAGE, DemandPermissions.USER_MANAGE), 1L);
     Map<String, Object> matrix = forms.permissionMatrix(1L);
-    assertEquals(3, ((List<?>) matrix.get("capabilities")).size());
+    assertEquals(2, ((List<?>) matrix.get("capabilities")).size());
     @SuppressWarnings("unchecked")
     List<Map<String, Object>> users = (List<Map<String, Object>>) matrix.get("users");
     assertTrue(users.stream().anyMatch(row -> "60".equals(String.valueOf(row.get("userId")))));
@@ -2105,7 +2105,7 @@ class DemandWorkflowTest {
         .andExpect(
             org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath(
                     "$.data.capabilities.length()")
-                .value(3));
+                .value(2));
     mvc.perform(
             org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
                     "/demand-api/admin/permissions/30")
