@@ -15,4 +15,10 @@ public class DemandProperties {
   private boolean enabled;
   /** 额外管理员由运维配置或管理页面授权，普通登录不自动提权。 */
   private List<Long> adminIds = new ArrayList<>();
+  /** 轮次与提醒使用的业务时区。 */
+  private String zone = "Asia/Shanghai";
+  /** 每日必填提醒任务开关。 */
+  private boolean reminderEnabled = true;
+  /** 每日必填提醒任务 cron；默认 09:05 执行。 */
+  private String reminderCron = "0 5 9 * * *";
 }

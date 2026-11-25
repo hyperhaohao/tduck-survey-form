@@ -8,9 +8,11 @@ import com.tduck.cloud.common.exception.BaseException;
 import com.tduck.cloud.common.util.SecurityUtils;
 import java.util.*;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 /** 填报、经办、管理权限并集；所有接口复用服务端判定。 */
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class DemandAccess {
@@ -18,6 +20,7 @@ public class DemandAccess {
   private final DemandProperties properties;
   private final UserService users;
   private final DemandPermissions permissions;
+  private final DemandRounds rounds;
   /** 模块是否启用。 */
   public boolean enabled() {
     return properties.isEnabled();
@@ -186,6 +189,7 @@ public class DemandAccess {
   public void requireFill(String key, Long userId, boolean anonymous) {
     Map<String, Object> form = form(key);
     if (form == null) return;
+    form = rounds.advanceIfExpired(form);
     if (store.count("SELECT COUNT(*) FROM fm_user_form WHERE form_key=? AND is_deleted=FALSE", key)
         == 0) throw new BaseException("该收集单已删除");
     if (flag(form.get("voided"))) throw new BaseException("该收集单已作废");
@@ -193,7 +197,12 @@ public class DemandAccess {
     if (form.get("endTime") instanceof java.util.Date
         && ((java.util.Date) form.get("endTime")).getTime() < System.currentTimeMillis())
       throw new BaseException("该收集单已截止");
+    if (form.get("roundEndTime") instanceof java.util.Date
+        && ((java.util.Date) form.get("roundEndTime")).getTime() < System.currentTimeMillis())
+      throw new BaseException("本轮收集已截止");
     if (anonymous) {
+      if (flag(form.get("requiresLeaderApproval")))
+        throw new BaseException("该收集单需部门主管审批，不允许匿名填写", 403);
       if (!flag(form.get("allowAnonymous")) || !"LOGIN".equals(form.get("visibility")))
         throw new BaseException("该收集单不允许匿名填写", 403);
     } else if (!canFill(form, userId)) throw new BaseException("请登录后使用有填报权限的账户填写", 403);
@@ -238,6 +247,9 @@ public class DemandAccess {
       m.put("manage", false);
       m.put("granted", Collections.emptyList());
       m.put("permissionApi", true);
+      m.put("noticeUnread", 0);
+      m.put("approvalPending", 0);
+      m.put("approver", false);
       return m;
     }
     boolean global = globalAdmin(userId);
@@ -295,6 +307,30 @@ public class DemandAccess {
     m.put(
         "publicationUnread",
         store.count(publicationUnread.toString(), publicationArgs.toArray()));
+    long noticeUnread = 0;
+    try {
+      noticeUnread =
+          store.count(
+              "SELECT COUNT(*) FROM rm_demand_notice WHERE user_id=? AND read_at IS NULL", userId);
+    } catch (org.springframework.dao.DataAccessException error) {
+      log.warn("消息表尚未就绪，暂不返回未读消息数");
+    }
+    m.put("noticeUnread", noticeUnread);
+    long approvalPending = 0;
+    try {
+      approvalPending =
+          store.count(
+              "SELECT COUNT(*) FROM rm_demand d JOIN fm_user_form f ON f.form_key=d.form_key AND f.is_deleted=FALSE"
+                  + " WHERE d.approval_status='PENDING' AND d.approval_leader_id=?",
+              userId);
+    } catch (org.springframework.dao.DataAccessException error) {
+      log.warn("审批字段尚未就绪，暂不返回待审批数");
+    }
+    boolean departmentLeader =
+        store.count("SELECT COUNT(*) FROM rm_demand_dept WHERE leader_id=? AND active=TRUE", userId)
+            > 0;
+    m.put("approvalPending", approvalPending);
+    m.put("approver", departmentLeader || approvalPending > 0);
     return m;
   }
 }

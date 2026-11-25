@@ -32,6 +32,9 @@ final class DemandScope {
         in(where, args, "f.form_key", grants.manageForms());
         where.append(")");
       }
+    } else if ("approval".equals(scope)) {
+      where.append(" AND d.approval_status='PENDING' AND d.approval_leader_id=?");
+      args.add(userId);
     } else throw new BaseException("列表类型无效");
   }
   /** 未办结待办、只收集未读与填报者追问三类待办。 */
@@ -57,7 +60,7 @@ final class DemandScope {
       DemandGrants grants,
       boolean global) {
     where.append(NOT_COLLECT_ONLY)
-        .append("d.decision<>'REJECTED' AND d.progress<>'COMPLETED' AND (")
+        .append("d.decision<>'REJECTED' AND d.progress<>'COMPLETED' AND d.approval_status IN ('NONE','APPROVED') AND (")
         .append("(d.handler_id=? AND ");
     args.add(userId);
     in(where, args, "d.form_key", grants.handleForms());
@@ -79,6 +82,7 @@ final class DemandScope {
       DemandGrants grants,
       boolean global) {
     where.append(COLLECT_ONLY)
+        .append("d.approval_status IN ('NONE','APPROVED') AND ")
         .append(
             "NOT EXISTS(SELECT 1 FROM rm_demand_read cr WHERE cr.object_type='DEMAND' AND cr.object_id=d.id AND cr.user_id=? AND cr.seen_version>=d.public_version) AND (")
         .append("(d.handler_id=? AND ");
@@ -101,7 +105,7 @@ final class DemandScope {
       DemandGrants grants,
       boolean global) {
     where.append(NOT_COLLECT_ONLY)
-        .append("d.followup_at IS NOT NULL AND (")
+        .append("d.approval_status IN ('NONE','APPROVED') AND d.followup_at IS NOT NULL AND (")
         .append("(d.handler_id=? AND ");
     args.add(userId);
     in(where, args, "d.form_key", grants.handleForms());

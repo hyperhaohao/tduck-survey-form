@@ -24,6 +24,9 @@ public class DemandController {
   private final DemandWorkflow workflow;
   private final DemandExport export;
   private final DemandDepartments departmentService;
+  private final DemandNotices notices;
+  private final DemandRequired required;
+  private final DemandApproval approval;
   /** 公开能力开关及登录后的菜单与角标。 */
   @NotLogin
   @GetMapping("/capabilities")
@@ -63,6 +66,27 @@ public class DemandController {
   public Result<?> configure(
       @PathVariable String key, @RequestBody Map<String, Object> body, HttpServletRequest r) {
     forms.configure(key, body, user(r));
+    return Result.success();
+  }
+  /** 必填人配置、来源与本轮统计。 */
+  @GetMapping("/admin/forms/{key}/required-members")
+  public Result<?> requiredMembers(@PathVariable String key, HttpServletRequest r) {
+    return Result.success(required.settings(key, user(r)));
+  }
+  /** 保存必填人来源。 */
+  @PostMapping("/admin/forms/{key}/required-members")
+  public Result<?> saveRequiredMembers(
+      @PathVariable String key, @RequestBody Map<String, Object> body, HttpServletRequest r) {
+    required.save(key, body, user(r));
+    return Result.success();
+  }
+  /** 手工开启下一轮。 */
+  @PostMapping("/admin/forms/{key}/round/next")
+  public Result<?> nextRound(
+      @PathVariable String key,
+      @RequestBody(required = false) Map<String, Object> body,
+      HttpServletRequest r) {
+    forms.nextRound(key, body == null ? new LinkedHashMap<>() : body, user(r));
     return Result.success();
   }
   /** 作废或恢复收集单；作废后停止新填报，需求历史保留。 */
@@ -319,10 +343,16 @@ public class DemandController {
     if (row == null) throw new BaseException("需求不存在或无权访问", 403);
     return row.get("id").toString();
   }
+  /** 部门主管通过或驳回审批。 */
+  @PostMapping("/requests/{id}/approval")
+  public Result<?> decideApproval(
+      @PathVariable String id, @RequestBody Map<String, Object> body, HttpServletRequest r) {
+    approval.decide(id, body, user(r));
+    return Result.success();
+  }
   /** 分派或改派。 */
   @PostMapping("/requests/{id}/assign")
-  public Result<?> assign(
-      @PathVariable String id, @RequestBody Map<String, Object> body, HttpServletRequest r) {
+  public Result<?> assign(      @PathVariable String id, @RequestBody Map<String, Object> body, HttpServletRequest r) {
     workflow.assign(id, number(body.get("handlerId")), number(body.get("revision")), user(r));
     return Result.success();
   }
@@ -363,6 +393,27 @@ public class DemandController {
         number(body.get("version")),
         user(r));
     return Result.success();
+  }
+  /** 站内消息列表：包含已读，支持类型与未读筛选。 */
+  @GetMapping("/notices")
+  public Result<?> listNotices(
+      @RequestParam(defaultValue = "") String kind,
+      @RequestParam(defaultValue = "false") boolean unreadOnly,
+      @RequestParam(defaultValue = "1") int page,
+      @RequestParam(defaultValue = "20") int size,
+      HttpServletRequest r) {
+    return Result.success(notices.list(user(r), kind, unreadOnly, page, size));
+  }
+  /** 标记本人单条消息已读。 */
+  @PostMapping("/notices/{id}/read")
+  public Result<?> readNotice(@PathVariable String id, HttpServletRequest r) {
+    notices.read(id, user(r));
+    return Result.success();
+  }
+  /** 本人全部消息标记已读。 */
+  @PostMapping("/notices/read-all")
+  public Result<?> readAllNotices(HttpServletRequest r) {
+    return Result.success(notices.readAll(user(r)));
   }
   /** 单据管理员审核发布或撤回公示。 */
   @PostMapping("/requests/{id}/publication")

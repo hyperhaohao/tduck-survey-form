@@ -3,6 +3,7 @@ package com.tduck.cloud.api.demand;
 import static com.tduck.cloud.api.demand.DemandStore.*;
 
 import com.tduck.cloud.common.exception.BaseException;
+import java.sql.Timestamp;
 import java.util.*;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -15,6 +16,9 @@ public class DemandForms {
   private final DemandStore store;
   private final DemandAccess access;
   private final DemandPermissions permissions;
+  private final DemandRounds rounds;
+  private final DemandRequired required;
+  private final DemandNotices notices;
   /** 查询当前身份可见的收集单，管理查询不公开名单。 */
   public List<Map<String, Object>> list(Long userId, boolean management) {
     access.requireEnabled();
@@ -22,7 +26,7 @@ public class DemandForms {
     boolean global = access.globalAdmin(userId);
     StringBuilder sql =
         new StringBuilder(
-            "SELECT f.form_key,f.name,f.description,f.status,c.summary,c.visibility,c.collect_only,c.allow_anonymous,c.published,c.end_time,c.voided,c.revision,c.sort_no,(SELECT COUNT(*) FROM rm_demand d WHERE d.form_key=f.form_key) AS demand_count FROM fm_user_form f "
+            "SELECT f.form_key,f.name,f.description,f.status,c.summary,c.visibility,c.collect_only,c.allow_anonymous,c.published,c.end_time,c.voided,c.revision,c.sort_no,c.round_mode,c.round_period,c.round_no,c.round_start_time,c.round_end_time,c.reminder_mode,c.require_members,c.requires_leader_approval,(SELECT COUNT(*) FROM rm_demand d WHERE d.form_key=f.form_key) AS demand_count FROM fm_user_form f "
                 + (management ? "LEFT" : "INNER")
                 + " JOIN rm_demand_form c ON c.form_key=f.form_key WHERE f.is_deleted=FALSE AND (f.is_folder=FALSE OR f.is_folder IS NULL)");
     List<Object> args = new ArrayList<>();
@@ -65,6 +69,11 @@ public class DemandForms {
       row.put("canFill", userId != null && (login || grants.canFill(key)));
       row.put("canHandle", userId != null && (globalAdmin || grants.canHandle(key)));
       row.put("canManage", userId != null && (globalAdmin || grants.canManage(key)));
+      Map<String, Object> rounded = rounds.advanceIfExpired(row);
+      copyRound(row, rounded);
+      Map<String, Object> state = required.employeeState(key, userId, rounded);
+      row.put("requiredOfMe", state.get("required"));
+      row.put("requiredSubmitted", state.get("submitted"));
     }
     return rows;
   }
@@ -73,6 +82,7 @@ public class DemandForms {
     if (!access.enabled()) return Collections.singletonMap("managed", false);
     Map<String, Object> form = access.form(key);
     if (form == null) return Collections.singletonMap("managed", false);
+    form = rounds.advanceIfExpired(form);
     boolean deleted =
         store.count("SELECT COUNT(*) FROM fm_user_form WHERE form_key=? AND is_deleted=FALSE", key)
             == 0;
@@ -89,6 +99,8 @@ public class DemandForms {
               && flag(form.get("allowAnonymous"))
               && "LOGIN".equals(form.get("visibility")));
       gate.put("collectOnly", !deleted && flag(form.get("collectOnly")));
+      gate.put("roundMode", DemandRounds.str(form.get("roundMode")));
+      gate.put("roundEndTime", form.get("roundEndTime"));
       return gate;
     }
     if (deleted) {
@@ -102,6 +114,9 @@ public class DemandForms {
     if (!access.table(key, userId)) access.requireFill(key, userId, false);
     Map<String, Object> result = new LinkedHashMap<>(form);
     result.put("managed", true);
+    Map<String, Object> state = required.employeeState(key, userId, form);
+    result.put("requiredOfMe", state.get("required"));
+    result.put("requiredSubmitted", state.get("submitted"));
     return result;
   }
   /** 设置独立业务收集配置，不能将指定人员收集单同时开放匿名。 */
@@ -111,28 +126,87 @@ public class DemandForms {
         == 0) throw new BaseException("表单不存在");
     if (!access.globalAdmin(userId) && !access.manage(key, userId) && !access.owner(key, userId))
       throw new BaseException("仅该收集单的创建人或单据管理员可执行此操作", 403);
+    rounds.advanceIfExpired(access.form(key));
+    Map<String, Object> old =
+        store.one("SELECT * FROM rm_demand_form WHERE form_key=? FOR UPDATE", key);
     String visibility = String.valueOf(body.getOrDefault("visibility", "LOGIN"));
     if (!Arrays.asList("LOGIN", "SELECTED").contains(visibility)) throw new BaseException("填报范围无效");
     boolean anonymous = flag(body.get("allowAnonymous"));
+    boolean requiresLeaderApproval =
+        body.containsKey("requiresLeaderApproval")
+            ? flag(body.get("requiresLeaderApproval"))
+            : old != null && flag(old.get("requiresLeaderApproval"));
+    if (requiresLeaderApproval) anonymous = false;
     if (anonymous && !"LOGIN".equals(visibility)) throw new BaseException("指定人员收集单不能开放匿名填写");
     String summary = body.get("summary") == null ? "" : body.get("summary").toString();
     if (summary.length() > 2000) throw new BaseException("说明不能超过2000字");
     Object end = body.get("endTime");
     java.sql.Timestamp endTime =
         end == null || end.toString().isEmpty() ? null : java.sql.Timestamp.valueOf(end.toString());
-    Map<String, Object> old =
-        store.one("SELECT * FROM rm_demand_form WHERE form_key=? FOR UPDATE", key);
     boolean collectOnly =
         body.containsKey("collectOnly")
             ? flag(body.get("collectOnly"))
             : old != null && flag(old.get("collectOnly"));
+    String oldMode = old == null ? DemandRounds.NONE : DemandRounds.str(old.get("roundMode"));
+    if (oldMode.isEmpty()) oldMode = DemandRounds.NONE;
+    String roundMode =
+        body.containsKey("roundMode")
+            ? DemandRounds.str(body.get("roundMode")).trim().toUpperCase(Locale.ROOT)
+            : oldMode;
+    if (!Arrays.asList(DemandRounds.NONE, DemandRounds.SINGLE, DemandRounds.PERIODIC)
+        .contains(roundMode)) throw new BaseException("轮次模式无效");
+    String roundPeriod =
+        body.containsKey("roundPeriod")
+            ? DemandRounds.str(body.get("roundPeriod")).trim().toUpperCase(Locale.ROOT)
+            : old == null ? "" : DemandRounds.str(old.get("roundPeriod"));
+    if (DemandRounds.PERIODIC.equals(roundMode)) {
+      if (!Arrays.asList(DemandRounds.MONTH, DemandRounds.QUARTER).contains(roundPeriod))
+        roundPeriod = DemandRounds.MONTH;
+    } else roundPeriod = null;
+    String reminderMode =
+        body.containsKey("reminderMode")
+            ? DemandRounds.str(body.get("reminderMode")).trim().toUpperCase(Locale.ROOT)
+            : old == null ? "DEFAULT" : DemandRounds.str(old.get("reminderMode"));
+    if (!Arrays.asList("DEFAULT", "STRONG").contains(reminderMode)) reminderMode = "DEFAULT";
+    boolean requireMembers =
+        body.containsKey("requireMembers")
+            ? flag(body.get("requireMembers"))
+            : old != null && flag(old.get("requireMembers"));
+    Timestamp roundEnd =
+        body.containsKey("roundEndTime")
+            ? rounds.parse(body.get("roundEndTime"))
+            : old == null ? null : DemandRounds.timestamp(old.get("roundEndTime"));
+    if (body.containsKey("roundEndTime")
+        && body.get("roundEndTime") != null
+        && !body.get("roundEndTime").toString().trim().isEmpty()
+        && roundEnd == null) throw new BaseException("本轮截止期限格式无效");
+    long roundNo = old == null ? 0 : number(old.get("roundNo"));
+    Timestamp roundStart = old == null ? null : DemandRounds.timestamp(old.get("roundStartTime"));
+    if (DemandRounds.NONE.equals(roundMode)) {
+      roundNo = 0;
+      roundStart = null;
+      roundEnd = null;
+    } else {
+      if (roundNo <= 0 || !roundMode.equals(oldMode)) {
+        roundNo = 1;
+        roundStart = rounds.now();
+      }
+      if (roundEnd == null) {
+        if (DemandRounds.PERIODIC.equals(roundMode))
+          roundEnd = rounds.plusPeriod(roundStart, roundPeriod);
+        else throw new BaseException("请选择本轮截止期限");
+      }
+      if (roundEnd.getTime() <= rounds.now().getTime()
+          && body.containsKey("roundEndTime"))
+        throw new BaseException("本轮截止期限需晚于当前时间");
+    }
     if (old == null) {
       Map<String, Object> next =
           store.one("SELECT COALESCE(MIN(sort_no),0)-1 AS next_sort FROM rm_demand_form");
       long sortNo =
           next == null || next.get("nextSort") == null ? 0 : number(next.get("nextSort"));
       store.update(
-          "INSERT INTO rm_demand_form(form_key,summary,visibility,allow_anonymous,published,end_time,sort_no,collect_only) VALUES(?,?,?,?,?,?,?,?)",
+          "INSERT INTO rm_demand_form(form_key,summary,visibility,allow_anonymous,published,end_time,sort_no,collect_only,round_mode,round_period,round_no,round_start_time,round_end_time,reminder_mode,require_members,requires_leader_approval) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
           key,
           summary,
           visibility,
@@ -140,22 +214,63 @@ public class DemandForms {
           flag(body.get("published")),
           endTime,
           sortNo,
-          collectOnly);
+          collectOnly,
+          roundMode,
+          roundPeriod,
+          roundNo,
+          roundStart,
+          roundEnd,
+          reminderMode,
+          requireMembers,
+          requiresLeaderApproval);
       grantCreatorManager(key);
     } else {
       long revision = Long.parseLong(String.valueOf(body.getOrDefault("revision", -1)));
       if (revision != number(old.get("revision"))) throw new BaseException("配置已变化，请刷新后重试", 409);
       store.update(
-          "UPDATE rm_demand_form SET summary=?,visibility=?,allow_anonymous=?,published=?,end_time=?,collect_only=?,revision=revision+1 WHERE form_key=?",
+          "UPDATE rm_demand_form SET summary=?,visibility=?,allow_anonymous=?,published=?,end_time=?,collect_only=?,round_mode=?,round_period=?,round_no=?,round_start_time=?,round_end_time=?,reminder_mode=?,require_members=?,requires_leader_approval=?,revision=revision+1 WHERE form_key=?",
           summary,
           visibility,
           anonymous,
           flag(body.get("published")),
           endTime,
           collectOnly,
+          roundMode,
+          roundPeriod,
+          roundNo,
+          roundStart,
+          roundEnd,
+          reminderMode,
+          requireMembers,
+          requiresLeaderApproval,
           key);
       if (!access.hasOtherManager(key, null, null)) grantCreatorManager(key);
     }
+  }
+  /** 手工开启下一轮；单轮与周期均可用。 */
+  @Transactional
+  public void nextRound(String key, Map<String, Object> body, Long userId) {
+    if (!access.globalAdmin(userId) && !access.manage(key, userId) && !access.owner(key, userId))
+      throw new BaseException("仅该收集单的创建人或单据管理员可执行此操作", 403);
+    Object value = body.get("roundEndTime");
+    Timestamp end =
+        value == null || value.toString().trim().isEmpty()
+            ? null
+            : rounds.parse(value);
+    if (end == null && value != null && !value.toString().trim().isEmpty())
+      throw new BaseException("本轮截止期限格式无效");
+    rounds.next(key, end);
+  }
+  /** 将 SQL 行中的轮次字段同步到管理列表行。 */
+  private void copyRound(Map<String, Object> row, Map<String, Object> source) {
+    if (source == null) return;
+    row.put("roundMode", source.get("roundMode"));
+    row.put("roundPeriod", source.get("roundPeriod"));
+    row.put("roundNo", source.get("roundNo"));
+    row.put("roundStartTime", source.get("roundStartTime"));
+    row.put("roundEndTime", source.get("roundEndTime"));
+    row.put("reminderMode", source.get("reminderMode"));
+    row.put("requireMembers", source.get("requireMembers"));
   }
   /** 全局管理员保存首页收集单全局顺序；未出现在请求中的收集单保持原位。 */
   @Transactional
@@ -230,6 +345,7 @@ public class DemandForms {
           "UPDATE rm_demand_form SET deleted_by=?,deleted_at=CURRENT_TIMESTAMP WHERE form_key=?",
           userId,
           key);
+      notices.deleteForForm(key);
     }
     Map<String, Object> result = new LinkedHashMap<>();
     result.put("demandCount", demands);
@@ -268,6 +384,8 @@ public class DemandForms {
             "fm_user_form_auth",
             "rm_demand_acl",
             "rm_demand_acl_dept",
+            "rm_demand_required",
+            "rm_demand_notice",
             "rm_demand_form",
             "rm_demand",
             "fm_user_form")) {

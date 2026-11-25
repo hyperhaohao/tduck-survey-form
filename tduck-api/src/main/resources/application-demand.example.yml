@@ -2,6 +2,9 @@ ruima:
   demand:
     enabled: true
     admin-ids: []
+    zone: Asia/Shanghai
+    reminder-enabled: true
+    reminder-cron: 0 5 9 * * *
   oidc:
     enabled: true
     issuer: ${OIDC_ISSUER:http://192.168.1.237:13004}

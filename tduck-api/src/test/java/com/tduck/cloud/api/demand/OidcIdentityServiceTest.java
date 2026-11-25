@@ -97,7 +97,10 @@ class OidcIdentityServiceTest {
     DemandPermissions permissions = new DemandPermissions(store, flags);
     service =
         new OidcIdentityService(
-            p, new DemandAccess(store, flags, users, permissions), store, users);
+            p,
+            new DemandAccess(store, flags, users, permissions, new DemandRounds(store, flags)),
+            store,
+            users);
   }
 
   @AfterEach

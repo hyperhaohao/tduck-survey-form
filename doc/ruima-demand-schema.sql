@@ -4,7 +4,11 @@ CREATE TABLE IF NOT EXISTS rm_demand_form (
  allow_anonymous BOOLEAN NOT NULL DEFAULT FALSE, published BOOLEAN NOT NULL DEFAULT FALSE,
  end_time TIMESTAMP NULL, voided BOOLEAN NOT NULL DEFAULT FALSE,
  voided_by BIGINT NULL, voided_at TIMESTAMP NULL, deleted_by BIGINT NULL, deleted_at TIMESTAMP NULL,
- revision INT NOT NULL DEFAULT 0, sort_no INT NOT NULL DEFAULT 0, collect_only BOOLEAN NOT NULL DEFAULT FALSE
+ revision INT NOT NULL DEFAULT 0, sort_no INT NOT NULL DEFAULT 0, collect_only BOOLEAN NOT NULL DEFAULT FALSE,
+ round_mode VARCHAR(16) NOT NULL DEFAULT 'NONE', round_period VARCHAR(16) NULL, round_no INT NOT NULL DEFAULT 0,
+ round_start_time TIMESTAMP NULL, round_end_time TIMESTAMP NULL,
+ reminder_mode VARCHAR(16) NOT NULL DEFAULT 'DEFAULT', require_members BOOLEAN NOT NULL DEFAULT FALSE,
+ requires_leader_approval BOOLEAN NOT NULL DEFAULT FALSE
 );
 CREATE TABLE IF NOT EXISTS rm_demand_acl (
  form_key VARCHAR(64) NOT NULL, user_id BIGINT NOT NULL, can_fill BOOLEAN NOT NULL DEFAULT FALSE,
@@ -45,6 +49,8 @@ CREATE TABLE IF NOT EXISTS rm_demand (
  reason TEXT, completion TEXT, department TEXT NULL, query_hash VARCHAR(64), revision INT NOT NULL DEFAULT 0,
  public_version BIGINT NOT NULL DEFAULT 1, publication_skipped BOOLEAN NOT NULL DEFAULT FALSE,
  followup_at TIMESTAMP NULL,
+ approval_status VARCHAR(16) NOT NULL DEFAULT 'NONE', approval_leader_id BIGINT NULL,
+ approval_comment VARCHAR(2000) NULL, approval_at TIMESTAMP NULL,
  create_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
  update_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -81,3 +87,19 @@ CREATE TABLE IF NOT EXISTS rm_demand_login_ticket (
  ticket_hash VARCHAR(64) PRIMARY KEY, user_id BIGINT NOT NULL, browser_hash VARCHAR(64) NOT NULL,
  expires_at TIMESTAMP NOT NULL
 );
+CREATE TABLE IF NOT EXISTS rm_demand_required (
+ form_key VARCHAR(64) NOT NULL, subject_type VARCHAR(8) NOT NULL, subject_id VARCHAR(64) NOT NULL,
+ created_by BIGINT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ PRIMARY KEY(form_key,subject_type,subject_id)
+);
+CREATE INDEX idx_required_form ON rm_demand_required(form_key);
+CREATE TABLE IF NOT EXISTS rm_demand_notice (
+ id VARCHAR(36) PRIMARY KEY, user_id BIGINT NOT NULL, kind VARCHAR(24) NOT NULL,
+ form_key VARCHAR(64) NULL, demand_id VARCHAR(36) NULL, publication_id VARCHAR(36) NULL,
+ round_no INT NULL, title VARCHAR(200) NOT NULL, content VARCHAR(1000) NULL,
+ read_at TIMESTAMP NULL, create_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_notice_user ON rm_demand_notice(user_id,create_time);
+CREATE INDEX idx_notice_user_read ON rm_demand_notice(user_id,read_at);
+CREATE INDEX idx_notice_demand ON rm_demand_notice(demand_id);
+CREATE INDEX idx_notice_publication ON rm_demand_notice(publication_id);

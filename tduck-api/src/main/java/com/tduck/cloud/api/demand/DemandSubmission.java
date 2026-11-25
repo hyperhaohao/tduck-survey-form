@@ -17,6 +17,8 @@ public class DemandSubmission {
   private final DemandStore store;
   private final DemandAccess access;
   private final DemandFormFields formFields;
+  private final DemandNotices notices;
+  private final DemandApproval approval;
   /** 提交前验证权限并清除客户端伪造的身份和记录标识。 */
   public void before(UserFormDataEntity entity, Long userId, boolean backend) {
     if (access.form(entity.getFormKey()) == null) return;
@@ -71,11 +73,20 @@ public class DemandSubmission {
         backend ? userId : null,
         queryCode == null ? null : hash(queryCode),
         formFields.snapshotJson(userId, anonymous));
+    Map<String, Object> notice = new LinkedHashMap<>();
+    notice.put("id", demandId);
+    notice.put("formKey", entity.getFormKey());
+    notice.put("title", title);
+    notice.put("submitterId", anonymous ? null : userId);
+    notice.put("anonymous", anonymous);
+    boolean approvalPending = !anonymous && approval.start(notice) != null;
+    if (!approvalPending) notices.newDemand(notice);
     Map<String, Object> receipt = new LinkedHashMap<>();
     receipt.put("id", demandId);
     receipt.put("requestNo", requestNo);
     receipt.put("anonymous", anonymous);
     receipt.put("queryCode", queryCode);
+    receipt.put("approvalPending", approvalPending);
     result.put("demandReceipt", receipt);
   }
 }

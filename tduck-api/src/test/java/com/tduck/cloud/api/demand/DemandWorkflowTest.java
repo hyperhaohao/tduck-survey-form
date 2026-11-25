@@ -13,6 +13,8 @@ import com.tduck.cloud.form.entity.UserFormDataEntity;
 import com.tduck.cloud.form.entity.UserFormItemEntity;
 import com.tduck.cloud.form.service.UserFormItemService;
 import com.tduck.cloud.form.vo.FormFieldVO;
+import java.sql.Timestamp;
+import java.time.LocalDate;
 import java.util.*;
 import java.util.concurrent.*;
 import org.apache.poi.ss.usermodel.*;
@@ -38,6 +40,11 @@ class DemandWorkflowTest {
   DemandWorkflow workflow;
   DemandExport export;
   DemandSubmission submission;
+  DemandRounds rounds;
+  DemandRequired required;
+  DemandNotices notices;
+  DemandApproval approval;
+  DemandReminderJob reminders;
   DemandProperties properties;
   DemandPermissions permissions;
   UserService users;
@@ -92,16 +99,21 @@ class DemandWorkflowTest {
     properties = new DemandProperties();
     properties.setEnabled(true);
     permissions = new DemandPermissions(store, properties);
-    access = new DemandAccess(store, properties, users, permissions);
+    rounds = new DemandRounds(store, properties);
+    access = new DemandAccess(store, properties, users, permissions, rounds);
+    notices = new DemandNotices(store, access, properties);
+    approval = new DemandApproval(store, access, notices);
+    required = new DemandRequired(store, access, rounds);
     formFields = new DemandFormFields(store);
-    forms = new DemandForms(store, access, permissions);
+    forms = new DemandForms(store, access, permissions, rounds, required, notices);
     departments = new DemandDepartments(store, access);
     UserFormItemService fields = mock(UserFormItemService.class);
     when(fields.listFormFields(anyString())).thenReturn(Collections.emptyList());
     this.fields = fields;
-    workflow = new DemandWorkflow(store, access, fields, formFields);
+    workflow = new DemandWorkflow(store, access, fields, formFields, notices, approval);
     export = new DemandExport(workflow, formFields);
-    submission = new DemandSubmission(store, access, formFields);
+    submission = new DemandSubmission(store, access, formFields, notices, approval);
+    reminders = new DemandReminderJob(properties, store, rounds, required, notices);
     tx = new TransactionTemplate(new DataSourceTransactionManager(ds));
   }
 
@@ -1997,7 +2009,8 @@ class DemandWorkflowTest {
     when(sessions.verifyToken(anyString(), anyLong())).thenReturn(true);
     org.springframework.test.web.servlet.MockMvc mvc =
         org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
-                new DemandController(access, forms, workflow, export, departments, store))
+                new DemandController(
+                    access, forms, workflow, export, departments, notices, required, approval, store))
             .setControllerAdvice(new com.tduck.cloud.api.exception.BaseExceptionHandler())
             .addInterceptors(
                 new com.tduck.cloud.api.web.interceptor.AuthorizationInterceptor(jwt, sessions),
@@ -2211,8 +2224,524 @@ class DemandWorkflowTest {
         .andExpect(
             org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
                 .value(200));
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get(
+                "/demand-api/notices"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
+                .value(401));
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get(
+                    "/demand-api/notices")
+                .header("token", "qa20"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
+                .value(200));
     assertTrue(store.one("SELECT id FROM rm_demand WHERE id=?", deletedId) == null);
     assertFalse(
         forms.members("A", 1L).stream().anyMatch(row -> number(row.get("userId")) == 30L));
+  }
+
+  private Timestamp in(long millis) {
+    return new Timestamp(System.currentTimeMillis() + millis);
+  }
+
+  private void configureRound(
+      String mode, String period, Timestamp end, boolean requireMembers, String reminderMode) {
+    Map<String, Object> form = store.one("SELECT revision FROM rm_demand_form WHERE form_key='A'");
+    forms.configure(
+        "A",
+        body(
+            "visibility",
+            "LOGIN",
+            "allowAnonymous",
+            true,
+            "published",
+            true,
+            "collectOnly",
+            false,
+            "revision",
+            number(form.get("revision")),
+            "roundMode",
+            mode,
+            "roundPeriod",
+            period,
+            "roundEndTime",
+            end,
+            "reminderMode",
+            reminderMode,
+            "requireMembers",
+            requireMembers),
+        1L);
+  }
+
+  private void saveRequired(Object... subjects) {
+    List<Map<String, Object>> list = new ArrayList<>();
+    for (int i = 0; i + 1 < subjects.length; i += 2)
+      list.add(body("type", subjects[i], "id", String.valueOf(subjects[i + 1])));
+    required.save("A", body("subjects", list, "requireMembers", false), 1L);
+  }
+
+  private long countNotice(long userId, String kind) {
+    return store.count(
+        "SELECT COUNT(*) FROM rm_demand_notice WHERE user_id=? AND kind=?", userId, kind);
+  }
+
+  @Test
+  void requiredSourcesUnionUsersDepartmentsAndMembers() {
+    jdbc.update("INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(10,'D1'),(20,'D2')");
+    configureRound("SINGLE", null, in(3600000), false, "DEFAULT");
+    saveRequired("USER", 20, "DEPT", "D1");
+    Map<String, Object> settings = required.settings("A", 1L);
+    List<Map<String, Object>> members = (List<Map<String, Object>>) settings.get("members");
+    assertEquals(2, members.size());
+    Map<Long, Map<String, Object>> byId = new LinkedHashMap<>();
+    for (Map<String, Object> member : members) byId.put(number(member.get("userId")), member);
+    assertTrue(((List<?>) byId.get(10L).get("sources")).contains("DEPT"));
+    assertTrue(((List<?>) byId.get(20L).get("sources")).containsAll(Arrays.asList("USER", "DEPT")));
+
+    create(9001, 20L, false);
+    create(9002, 10L, true);
+    settings = required.settings("A", 1L);
+    Map<String, Object> stats = (Map<String, Object>) settings.get("stats");
+    assertEquals(2L, number(stats.get("total")));
+    assertEquals(1L, number(stats.get("submitted")));
+    assertEquals(1L, number(stats.get("pending")));
+    assertEquals(1L, number(stats.get("anonymous")));
+    assertTrue(flag(required.employeeState("A", 20L).get("submitted")));
+    assertTrue(flag(required.employeeState("A", 10L).get("required")));
+    assertFalse(flag(required.employeeState("A", 10L).get("submitted")));
+    assertFalse(flag(required.employeeState("A", 30L).get("required")));
+  }
+
+  @Test
+  void periodicRoundAdvancesAndResetsSubmissionWindow() {
+    jdbc.update("INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(10,'D1')");
+    configureRound("PERIODIC", "MONTH", in(3600000), false, "DEFAULT");
+    saveRequired("USER", 10);
+    create(9010, 10L, false);
+    assertEquals(1L, number(((Map<String, Object>) required.settings("A", 1L).get("stats")).get("submitted")));
+    Timestamp past = new Timestamp(System.currentTimeMillis());
+    jdbc.update(
+        "UPDATE rm_demand_form SET round_start_time=?,round_end_time=? WHERE form_key='A'",
+        new Timestamp(past.getTime() - 86400000L),
+        past);
+    Map<String, Object> form = rounds.advance("A");
+    assertEquals(2L, number(form.get("roundNo")));
+    assertEquals(
+        past.getTime() / 1000, ((Timestamp) form.get("roundStartTime")).getTime() / 1000);
+    assertEquals(0L, number(((Map<String, Object>) required.settings("A", 1L).get("stats")).get("submitted")));
+  }
+
+  @Test
+  void singleRoundDeadlineStopsSubmission() {
+    configureRound("SINGLE", null, in(3600000), false, "DEFAULT");
+    jdbc.update(
+        "UPDATE rm_demand_form SET round_start_time=?,round_end_time=? WHERE form_key='A'",
+        new Timestamp(System.currentTimeMillis() - 7200000L),
+        new Timestamp(System.currentTimeMillis() - 1000L));
+    BaseException error = assertThrows(BaseException.class, () -> create(9020, 20L, false));
+    assertTrue(error.getMessage().contains("本轮收集已截止"));
+    assertThrows(BaseException.class, () -> create(9021, 10L, true));
+  }
+
+  @Test
+  void selectedRequiredMembersAutoGrantFill() {
+    Map<String, Object> form = store.one("SELECT revision FROM rm_demand_form WHERE form_key='A'");
+    forms.configure(
+        "A",
+        body(
+            "visibility",
+            "SELECTED",
+            "allowAnonymous",
+            false,
+            "published",
+            true,
+            "collectOnly",
+            false,
+            "revision",
+            number(form.get("revision")),
+            "roundMode",
+            "SINGLE",
+            "roundEndTime",
+            in(3600000),
+            "reminderMode",
+            "DEFAULT",
+            "requireMembers",
+            false),
+        1L);
+    saveRequired("USER", 60);
+    assertEquals(
+        1L,
+        store.count(
+            "SELECT COUNT(*) FROM rm_demand_acl WHERE form_key='A' AND user_id=60 AND can_fill=TRUE"));
+    assertTrue(access.canFill(access.form("A"), 60L));
+  }
+
+  @Test
+  void requiredSettingsRequireManager() {
+    assertThrows(BaseException.class, () -> required.settings("A", 30L));
+  }
+
+  @Test
+  void remindersFollowModeAndDedupePerDay() {
+    jdbc.update("INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(10,'D1')");
+    LocalDate today = LocalDate.of(2026, 12, 10);
+    Timestamp end =
+        Timestamp.from(
+            today.plusDays(1).atTime(10, 0).atZone(rounds.zone()).toInstant());
+    configureRound("SINGLE", null, end, false, "DEFAULT");
+    saveRequired("USER", 10);
+    assertEquals(1, reminders.remind(today));
+    assertEquals(0, reminders.remind(today.minusDays(3)));
+    assertEquals(1, reminders.remind(today));
+    Map<String, Object> form = store.one("SELECT revision FROM rm_demand_form WHERE form_key='A'");
+    forms.configure(
+        "A",
+        body(
+            "visibility",
+            "LOGIN",
+            "allowAnonymous",
+            true,
+            "published",
+            true,
+            "collectOnly",
+            false,
+            "revision",
+            number(form.get("revision")),
+            "roundMode",
+            "SINGLE",
+            "roundEndTime",
+            end,
+            "reminderMode",
+            "STRONG",
+            "requireMembers",
+            false),
+        1L);
+    jdbc.update("DELETE FROM rm_demand_notice");
+    assertEquals(1, reminders.remind(today.minusDays(3)));
+    assertEquals(1, reminders.remind(today.minusDays(3)));
+  }
+
+  @Test
+  void businessEventsCreateNoticesForRightUsers() {
+    String id = create(9030, 10L, false);
+    assignTo(id, 30);
+    outcome(id, "ACCEPTED", "PLANNED", "采纳说明", "");
+    workflow.reply(id, "REPLY", "已安排开发", 30L);
+    assertEquals(1L, countNotice(30L, DemandNotices.ASSIGN));
+    assertEquals(1L, countNotice(10L, DemandNotices.RESULT));
+    assertEquals(1L, countNotice(10L, DemandNotices.REPLY));
+    workflow.followUp(id, "什么时候完成？", 10L);
+    assertEquals(1L, countNotice(30L, DemandNotices.FOLLOWUP));
+    assertEquals(1L, countNotice(50L, DemandNotices.FOLLOWUP));
+    assertEquals(0L, countNotice(10L, DemandNotices.FOLLOWUP));
+    assertEquals(2L, notices.unread(10L));
+    notices.readAll(10L);
+    assertEquals(0L, notices.unread(10L));
+    assertEquals(2L, notices.unread(30L));
+  }
+
+  @Test
+  void publicationNotifiesVisibleAudienceAndExcludesOperator() {
+    String id = create(9040, 10L, false);
+    assignTo(id, 30);
+    outcome(id, "ACCEPTED", "PLANNED", "采纳说明", "");
+    workflow.publish(
+        id,
+        body(
+            "published",
+            true,
+            "title",
+            "公示标题",
+            "summary",
+            "摘要",
+            "content",
+            "正文",
+            "version",
+            0),
+        50L);
+    assertEquals(6L, store.count("SELECT COUNT(*) FROM rm_demand_notice WHERE kind='PUBLICATION'"));
+    assertEquals(0L, countNotice(50L, DemandNotices.PUBLICATION));
+    assertEquals(1L, countNotice(10L, DemandNotices.PUBLICATION));
+    Map<String, Object> publication =
+        store.one("SELECT id,version FROM rm_demand_publication WHERE demand_id=?", id);
+    workflow.archivePublication(
+        publication.get("id").toString(),
+        body("archived", true, "version", number(publication.get("version"))),
+        50L);
+    assertEquals(0L, store.count("SELECT COUNT(*) FROM rm_demand_notice WHERE kind='PUBLICATION'"));
+  }
+
+  @Test
+  void noticeReadOwnershipAndCapabilities() {
+    String id = create(9050, 10L, false);
+    assignTo(id, 30);
+    outcome(id, "ACCEPTED", "PLANNED", "采纳说明", "");
+    workflow.reply(id, "REPLY", "回复内容", 30L);
+    Map<String, Object> notice =
+        store.one("SELECT id FROM rm_demand_notice WHERE user_id=10 AND kind='REPLY'");
+    assertThrows(BaseException.class, () -> notices.read(notice.get("id").toString(), 20L));
+    assertEquals(2L, number(access.capabilities(10L).get("noticeUnread")));
+    notices.read(notice.get("id").toString(), 10L);
+    assertEquals(1L, number(access.capabilities(10L).get("noticeUnread")));
+    notices.readAll(10L);
+    assertEquals(0L, number(access.capabilities(10L).get("noticeUnread")));
+  }
+
+  @Test
+  void newDemandNotifiesManagersOnly() {
+    create(9060, 10L, false);
+    assertEquals(1L, countNotice(50L, DemandNotices.NEW_DEMAND));
+    assertEquals(0L, countNotice(10L, DemandNotices.NEW_DEMAND));
+  }
+
+  @Test
+  void deletingDemandClearsNotices() {
+    String id = create(9070, 10L, false);
+    assignTo(id, 30);
+    outcome(id, "ACCEPTED", "PLANNED", "采纳说明", "");
+    workflow.publish(
+        id,
+        body(
+            "published",
+            true,
+            "title",
+            "公示标题",
+            "summary",
+            "摘要",
+            "content",
+            "正文",
+            "version",
+            0),
+        50L);
+    assertTrue(
+        store.count("SELECT COUNT(*) FROM rm_demand_notice WHERE demand_id=?", id) > 0);
+    workflow.deleteDemand(id, revision(id), 50L);
+    assertEquals(
+        0L, store.count("SELECT COUNT(*) FROM rm_demand_notice WHERE demand_id=?", id));
+  }
+
+  @Test
+  void manualNextRoundResetsRequiredWindow() {
+    jdbc.update("INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(10,'D1')");
+    configureRound("SINGLE", null, in(3600000), false, "DEFAULT");
+    saveRequired("USER", 10);
+    create(9080, 10L, false);
+    assertEquals(1L, number(((Map<String, Object>) required.settings("A", 1L).get("stats")).get("submitted")));
+    forms.nextRound("A", body("roundEndTime", in(7200000)), 1L);
+    Map<String, Object> form = store.one("SELECT round_no FROM rm_demand_form WHERE form_key='A'");
+    assertEquals(2L, number(form.get("roundNo")));
+    assertEquals(0L, number(((Map<String, Object>) required.settings("A", 1L).get("stats")).get("submitted")));
+  }
+
+  private void setupLeader(long submitter, String deptKey, Long leader) {
+    jdbc.update("INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(?,?)", submitter, deptKey);
+    jdbc.update("UPDATE rm_demand_dept SET leader_id=? WHERE dept_key=?", leader, deptKey);
+  }
+
+  private void configureApproval(boolean required) {
+    Map<String, Object> form = store.one("SELECT revision FROM rm_demand_form WHERE form_key='A'");
+    forms.configure(
+        "A",
+        body(
+            "visibility",
+            "LOGIN",
+            "allowAnonymous",
+            false,
+            "published",
+            true,
+            "collectOnly",
+            false,
+            "revision",
+            number(form.get("revision")),
+            "roundMode",
+            "NONE",
+            "reminderMode",
+            "DEFAULT",
+            "requireMembers",
+            false,
+            "requiresLeaderApproval",
+            required),
+        1L);
+  }
+
+  private List<Map<String, Object>> listScope(long userId, String scope) {
+    return (List<Map<String, Object>>)
+        workflow.list(userId, scope, "", "", "", "", "", "", "", 1, 20).get("rows");
+  }
+
+  private void assignAs(String id, long handler, long operator) {
+    workflow.assign(id, handler, revision(id), operator);
+  }
+
+  @Test
+  void leaderApprovalSubmitApproveAndNotify() {
+    setupLeader(10L, "D1", 20L);
+    configureApproval(true);
+    String id = create(9100, 10L, false);
+    Map<String, Object> row =
+        store.one("SELECT approval_status,approval_leader_id FROM rm_demand WHERE id=?", id);
+    assertEquals("PENDING", row.get("approvalStatus"));
+    assertEquals(20L, number(row.get("approvalLeaderId")));
+    assertEquals(1L, countNotice(20L, DemandNotices.APPROVAL));
+    assertEquals(0L, countNotice(50L, DemandNotices.NEW_DEMAND));
+    assertEquals(1L, number(access.capabilities(20L).get("approvalPending")));
+    assertTrue(flag(access.capabilities(20L).get("approver")));
+    assertEquals(1, listScope(20L, "approval").size());
+    assertTrue(listScope(50L, "pending").isEmpty());
+    Map<String, Object> leaderDetail = workflow.detail(id, 20L, null);
+    assertTrue(flag(leaderDetail.get("canApprove")));
+    assertFalse(flag(leaderDetail.get("canViewTable")));
+    assertFalse(flag(workflow.detail(id, 10L, null).get("canFollowUp")));
+    BaseException gate = assertThrows(BaseException.class, () -> assignAs(id, 30, 50));
+    assertTrue(gate.getMessage().contains("待部门主管审批"));
+    approval.decide(
+        id, body("decision", "APPROVE", "comment", "同意", "revision", revision(id)), 20L);
+    assertEquals(
+        "APPROVED",
+        store.one("SELECT approval_status FROM rm_demand WHERE id=?", id).get("approvalStatus"));
+    assertEquals(1L, countNotice(10L, DemandNotices.APPROVAL_RESULT));
+    assertEquals(1L, countNotice(50L, DemandNotices.NEW_DEMAND));
+    assertEquals(0L, number(access.capabilities(20L).get("approvalPending")));
+    assertEquals(0, listScope(20L, "approval").size());
+    assertEquals(1, listScope(50L, "pending").size());
+    assignTo(id, 30);
+    assertEquals(1L, countNotice(30L, DemandNotices.ASSIGN));
+    assertEquals(
+        1L,
+        store.count(
+            "SELECT COUNT(*) FROM rm_demand_message WHERE demand_id=? AND kind='EVENT' AND content LIKE '%部门主管通过审批%'",
+            id));
+  }
+
+  @Test
+  void leaderRejectEndsDemandAndRequiresComment() {
+    setupLeader(10L, "D1", 20L);
+    configureApproval(true);
+    String id = create(9110, 10L, false);
+    assertThrows(
+        BaseException.class,
+        () ->
+            approval.decide(
+                id, body("decision", "REJECT", "comment", "", "revision", revision(id)), 20L));
+    approval.decide(
+        id, body("decision", "REJECT", "comment", "信息不足", "revision", revision(id)), 20L);
+    assertEquals(
+        "REJECTED",
+        store.one("SELECT approval_status FROM rm_demand WHERE id=?", id).get("approvalStatus"));
+    assertEquals(1L, countNotice(10L, DemandNotices.APPROVAL_RESULT));
+    assertEquals(0L, countNotice(50L, DemandNotices.NEW_DEMAND));
+    assertTrue(listScope(50L, "pending").isEmpty());
+    BaseException gate = assertThrows(BaseException.class, () -> assignAs(id, 30, 50));
+    assertTrue(gate.getMessage().contains("审批未通过"));
+    assertFalse(flag(workflow.detail(id, 10L, null).get("canFollowUp")));
+    assertEquals(0L, number(access.capabilities(20L).get("approvalPending")));
+  }
+
+  @Test
+  void noLeaderSkipsApprovalAndNotifiesManagers() {
+    configureApproval(true);
+    String id = create(9120, 10L, false);
+    assertEquals(
+        "NONE",
+        store.one("SELECT approval_status FROM rm_demand WHERE id=?", id).get("approvalStatus"));
+    assertEquals(1L, countNotice(50L, DemandNotices.NEW_DEMAND));
+    assertEquals(0L, countNotice(20L, DemandNotices.APPROVAL));
+    assertEquals(
+        1L,
+        store.count(
+            "SELECT COUNT(*) FROM rm_demand_message WHERE demand_id=? AND kind='EVENT' AND content LIKE '%未配置部门主管%'",
+            id));
+  }
+
+  @Test
+  void selfOrInactiveLeaderSkipsApproval() {
+    setupLeader(10L, "D1", 10L);
+    configureApproval(true);
+    assertEquals(
+        "NONE",
+        store
+            .one("SELECT approval_status FROM rm_demand WHERE id=?", create(9130, 10L, false))
+            .get("approvalStatus"));
+    jdbc.update("UPDATE rm_demand_dept SET leader_id=20 WHERE dept_key='D1'");
+    jdbc.update("UPDATE ac_user SET deleted=TRUE WHERE id=20");
+    assertEquals(
+        "NONE",
+        store
+            .one("SELECT approval_status FROM rm_demand WHERE id=?", create(9131, 10L, false))
+            .get("approvalStatus"));
+  }
+
+  @Test
+  void leaderApprovalDisablesAnonymous() {
+    Map<String, Object> form = store.one("SELECT revision FROM rm_demand_form WHERE form_key='A'");
+    forms.configure(
+        "A",
+        body(
+            "visibility",
+            "LOGIN",
+            "allowAnonymous",
+            true,
+            "published",
+            true,
+            "collectOnly",
+            false,
+            "revision",
+            number(form.get("revision")),
+            "roundMode",
+            "NONE",
+            "reminderMode",
+            "DEFAULT",
+            "requireMembers",
+            false,
+            "requiresLeaderApproval",
+            true),
+        1L);
+    Map<String, Object> row =
+        store.one(
+            "SELECT allow_anonymous,requires_leader_approval FROM rm_demand_form WHERE form_key='A'");
+    assertFalse(flag(row.get("allowAnonymous")));
+    assertTrue(flag(row.get("requiresLeaderApproval")));
+    BaseException error = assertThrows(BaseException.class, () -> create(9140, 10L, true));
+    assertTrue(error.getMessage().contains("需部门主管审批"));
+  }
+
+  @Test
+  void onlyCurrentLeaderCanApproveAndRevisionIsChecked() {
+    setupLeader(10L, "D1", 20L);
+    configureApproval(true);
+    String id = create(9150, 10L, false);
+    assertThrows(
+        BaseException.class,
+        () ->
+            approval.decide(
+                id, body("decision", "APPROVE", "revision", revision(id)), 30L));
+    assertThrows(
+        BaseException.class,
+        () ->
+            approval.decide(
+                id, body("decision", "APPROVE", "revision", revision(id) - 1), 20L));
+    approval.decide(id, body("decision", "APPROVE", "revision", revision(id)), 20L);
+    assertThrows(
+        BaseException.class,
+        () ->
+            approval.decide(
+                id, body("decision", "APPROVE", "revision", revision(id)), 20L));
+  }
+
+  @Test
+  void leaderCanViewPendingDetailButOthersCannot() {
+    setupLeader(10L, "D1", 20L);
+    configureApproval(true);
+    String id = create(9160, 10L, false);
+    Map<String, Object> leaderDetail = workflow.detail(id, 20L, null);
+    assertEquals("PENDING", leaderDetail.get("approvalStatus"));
+    assertEquals("人员20", leaderDetail.get("approvalLeaderName"));
+    assertTrue(flag(leaderDetail.get("canApprove")));
+    Map<String, Object> submitterDetail = workflow.detail(id, 10L, null);
+    assertEquals("PENDING", submitterDetail.get("approvalStatus"));
+    assertFalse(flag(submitterDetail.get("canFollowUp")));
+    assertThrows(BaseException.class, () -> workflow.detail(id, 60L, null));
   }
 }

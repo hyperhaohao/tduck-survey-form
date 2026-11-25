@@ -56,6 +56,11 @@ public class DemandStore {
   public int update(String sql, Object... args) {
     return jdbc.update(sql, args);
   }
+  /** 批量执行参数化更新；空集合直接返回。 */
+  public int[] batch(String sql, List<Object[]> rows) {
+    if (rows == null || rows.isEmpty()) return new int[0];
+    return jdbc.batchUpdate(sql, rows);
+  }
   /** 统计记录数量。 */
   public long count(String sql, Object... args) {
     Long n = jdbc.queryForObject(sql, Long.class, args);

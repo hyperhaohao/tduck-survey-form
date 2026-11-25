@@ -21,10 +21,12 @@ public class DemandWorkflow {
   private final DemandAccess access;
   private final UserFormItemService fields;
   private final DemandFormFields formFields;
+  private final DemandNotices notices;
+  private final DemandApproval approval;
   private static final String FROM =
       " FROM rm_demand d JOIN fm_user_form f ON f.form_key=d.form_key";
   private static final String ROW_SELECT =
-      "SELECT d.id,d.form_key,d.request_no,d.title,d.submitter_name,d.submitted_by,d.handler_id,d.decision,d.progress,d.reason,d.completion,d.create_time,d.update_time,d.public_version,d.publication_skipped,d.followup_at AS followup_at,d.revision,c.collect_only,f.name AS form_name,h.name AS handler_name,pub.published AS publication_published,pub.archived_at AS publication_archived_at,pub.deleted_at AS publication_deleted_at,pub.version AS publication_version,(SELECT MAX(m.create_time) FROM rm_demand_message m WHERE m.demand_id=d.id AND m.kind='REPLY') AS reply_time,CASE WHEN c.collect_only=TRUE THEN CASE WHEN r.seen_version IS NULL OR r.seen_version<d.public_version THEN TRUE ELSE FALSE END ELSE d.public_version>COALESCE(r.seen_version,1) END AS unread"
+      "SELECT d.id,d.form_key,d.request_no,d.title,d.submitter_name,d.submitted_by,d.handler_id,d.decision,d.progress,d.reason,d.completion,d.create_time,d.update_time,d.public_version,d.publication_skipped,d.followup_at AS followup_at,d.approval_status,d.revision,c.collect_only,f.name AS form_name,h.name AS handler_name,pub.published AS publication_published,pub.archived_at AS publication_archived_at,pub.deleted_at AS publication_deleted_at,pub.version AS publication_version,(SELECT MAX(m.create_time) FROM rm_demand_message m WHERE m.demand_id=d.id AND m.kind='REPLY') AS reply_time,CASE WHEN c.collect_only=TRUE THEN CASE WHEN r.seen_version IS NULL OR r.seen_version<d.public_version THEN TRUE ELSE FALSE END ELSE d.public_version>COALESCE(r.seen_version,1) END AS unread"
           + FROM
           + " LEFT JOIN rm_demand_form c ON c.form_key=d.form_key LEFT JOIN ac_user h ON h.id=d.handler_id LEFT JOIN rm_demand_publication pub ON pub.demand_id=d.id LEFT JOIN rm_demand_read r ON r.object_type='DEMAND' AND r.object_id=d.id AND r.user_id=?";
   /** 分页查询，按权限过滤后再统计数量。 */
@@ -224,7 +226,7 @@ public class DemandWorkflow {
     rowArgs.add(userId);
     rowArgs.addAll(args);
     String pendingExpression;
-    if ("pending".equals(scope)) pendingExpression = "COUNT(*)";
+    if ("pending".equals(scope) || "approval".equals(scope)) pendingExpression = "COUNT(*)";
     else if ("mine".equals(scope))
       pendingExpression =
           "SUM(CASE WHEN (c.collect_only IS NULL OR c.collect_only=FALSE) AND d.decision<>'REJECTED' AND d.progress<>'COMPLETED' THEN 1 ELSE 0 END)";
@@ -232,9 +234,11 @@ public class DemandWorkflow {
       pendingExpression =
           "SUM(CASE WHEN c.collect_only=TRUE THEN CASE WHEN d.public_version>COALESCE(r.seen_version,1) THEN 1 ELSE 0 END ELSE CASE WHEN (d.decision<>'REJECTED' AND d.progress<>'COMPLETED') OR d.followup_at IS NOT NULL THEN 1 ELSE 0 END END)";
     String unreadExpression =
-        "mine".equals(scope)
-            ? "SUM(CASE WHEN d.public_version>COALESCE(r.seen_version,1) THEN 1 ELSE 0 END)"
-            : "SUM(CASE WHEN c.collect_only=TRUE THEN CASE WHEN r.seen_version IS NULL OR r.seen_version<d.public_version THEN 1 ELSE 0 END ELSE CASE WHEN d.public_version>COALESCE(r.seen_version,1) THEN 1 ELSE 0 END END)";
+        "approval".equals(scope)
+            ? "0"
+            : "mine".equals(scope)
+                ? "SUM(CASE WHEN d.public_version>COALESCE(r.seen_version,1) THEN 1 ELSE 0 END)"
+                : "SUM(CASE WHEN c.collect_only=TRUE THEN CASE WHEN r.seen_version IS NULL OR r.seen_version<d.public_version THEN 1 ELSE 0 END ELSE CASE WHEN d.public_version>COALESCE(r.seen_version,1) THEN 1 ELSE 0 END END)";
     List<Map<String, Object>> rows =
         store.rows(
             "SELECT d.form_key,f.name AS form_name,COUNT(*) AS total,"
@@ -265,7 +269,10 @@ public class DemandWorkflow {
     boolean staff = access.table(d.get("formKey").toString(), userId);
     boolean own = userId != null && userId.equals(number(d.get("submitterId")));
     boolean anonymous = flag(d.get("anonymous")) && matches((String) d.get("queryHash"), queryCode);
-    if (!staff && !own && !anonymous) throw new BaseException("需求不存在或无权访问", 403);
+    boolean approver =
+        userId != null && userId.equals(number(d.get("approvalLeaderId")));
+    if (!staff && !own && !anonymous && !approver)
+      throw new BaseException("需求不存在或无权访问", 403);
     return d;
   }
   /** 返回详情，原表单数据只读取一次正本，内部备注与草稿独立过滤。 */
@@ -297,17 +304,24 @@ public class DemandWorkflow {
     List<FormFieldVO> fieldList = new ArrayList<>(fields.listFormFields(formKey));
     fieldList.removeIf(formFields::isDepartmentField);
     d.put("formFields", fieldList);
+    String approvalStatus = String.valueOf(d.getOrDefault("approvalStatus", "NONE"));
+    d.put("approvalStatus", approvalStatus);
+    Long approvalLeaderId = number(d.get("approvalLeaderId"));
+    d.put("approvalLeaderName", approvalLeaderId == null ? null : access.name(approvalLeaderId));
+    d.put("canApprove", approval.canApprove(d, userId));
+    boolean approvalBlocked = "PENDING".equals(approvalStatus) || "REJECTED".equals(approvalStatus);
     d.put("canViewTable", staff);
     d.put("canManage", manage);
     d.put(
         "canHandle",
         !collectOnly
+            && !approvalBlocked
             && (manage
                 || (userId != null
                     && userId.equals(number(d.get("handlerId")))
                     && access.handler(formKey, userId))));
-    d.put("canAssign", manage && !collectOnly);
-    d.put("canPublish", manage && !collectOnly);
+    d.put("canAssign", manage && !collectOnly && !approvalBlocked);
+    d.put("canPublish", manage && !collectOnly && !approvalBlocked);
     String messageSql =
         "SELECT id,author_id,author_name,kind,content,create_time FROM rm_demand_message WHERE demand_id=? AND ";
     if (staff)
@@ -330,6 +344,7 @@ public class DemandWorkflow {
     d.put(
         "canFollowUp",
         !collectOnly
+            && !approvalBlocked
             && userId != null
             && !anonymous
             && userId.equals(submitterId)
@@ -363,6 +378,7 @@ public class DemandWorkflow {
     store.update("DELETE FROM rm_demand_publication WHERE demand_id=?", id);
     store.update("DELETE FROM rm_demand_message WHERE demand_id=?", id);
     store.update("DELETE FROM rm_demand_read WHERE object_type='DEMAND' AND object_id=?", id);
+    notices.deleteForDemand(id);
     store.update("DELETE FROM rm_demand WHERE id=?", id);
     log.info("删除需求 id={} formKey={} operator={}", id, formKey, userId);
   }
@@ -372,14 +388,17 @@ public class DemandWorkflow {
     Map<String, Object> d = demand(id, userId, null, true);
     access.requireManage(d.get("formKey").toString(), userId);
     requireWorkflow(d.get("formKey").toString());
+    approval.requireApproved(d);
     checkRevision(d, revision);
     if (handlerId != null && !access.handler(d.get("formKey").toString(), handlerId))
       throw new BaseException("请选择该收集单已授权的经办人");
+    Long previous = number(d.get("handlerId"));
     store.update(
         "UPDATE rm_demand SET handler_id=?,revision=revision+1,public_version=public_version+1,update_time=CURRENT_TIMESTAMP WHERE id=?",
         handlerId,
         id);
     message(id, userId, "AUDIT", handlerId == null ? "取消经办分派" : "分派经办人：" + access.name(handlerId));
+    if (handlerId != null && !handlerId.equals(previous)) notices.assign(d, handlerId, userId);
   }
   /** 经办人或单据管理员发布采纳结果及实施进度。 */
   @Transactional
@@ -387,6 +406,7 @@ public class DemandWorkflow {
     Map<String, Object> d = demand(id, userId, null, true);
     access.requireHandle(d, userId);
     requireWorkflow(d.get("formKey").toString());
+    approval.requireApproved(d);
     checkRevision(d, number(body.get("revision")));
     String decision = String.valueOf(body.get("decision"));
     String progress = String.valueOf(body.get("progress"));
@@ -421,6 +441,9 @@ public class DemandWorkflow {
         "更新处理结果："
             + decisionLabel(decision)
             + ("ACCEPTED".equals(decision) ? "，" + progressLabel(progress) : ""));
+    notices.result(
+        d,
+        decisionLabel(decision) + ("ACCEPTED".equals(decision) ? "，" + progressLabel(progress) : ""));
   }
   /** 追加回复、内部备注或本人草稿，经办人或单据管理员均可操作。 */
   @Transactional
@@ -428,6 +451,7 @@ public class DemandWorkflow {
     Map<String, Object> d = demand(id, userId, null, true);
     access.requireHandle(d, userId);
     requireWorkflow(d.get("formKey").toString());
+    approval.requireApproved(d);
     if (!Arrays.asList("REPLY", "NOTE", "DRAFT").contains(kind)) throw new BaseException("回复类型无效");
     content = text(content, 10000);
     if ("DRAFT".equals(kind))
@@ -445,6 +469,7 @@ public class DemandWorkflow {
           id);
     }
     message(id, userId, kind, content);
+    if ("REPLY".equals(kind)) notices.reply(d, content);
   }
   /** 填报者追问本人需求，重新进入经办人与单据管理员的待办，不增加填报者未读。 */
   @Transactional
@@ -452,7 +477,8 @@ public class DemandWorkflow {
     access.requireEnabled();
     Map<String, Object> d =
         store.one(
-            "SELECT id,form_key,submitter_id,anonymous FROM rm_demand WHERE id=? FOR UPDATE", id);
+            "SELECT id,form_key,submitter_id,anonymous,handler_id,title FROM rm_demand WHERE id=? FOR UPDATE",
+            id);
     if (d == null) throw new BaseException("需求不存在或无权访问", 403);
     if (userId == null
         || !userId.equals(number(d.get("submitterId")))
@@ -463,11 +489,13 @@ public class DemandWorkflow {
             d.get("formKey"))
         == 0) throw new BaseException("该收集单已删除", 403);
     requireWorkflow(d.get("formKey").toString());
+    approval.requireApproved(d);
     content = text(content, 10000);
     store.update(
         "UPDATE rm_demand SET followup_at=CURRENT_TIMESTAMP,update_time=CURRENT_TIMESTAMP WHERE id=?",
         id);
     message(id, userId, "FOLLOWUP", content);
+    notices.followUp(d, content);
   }
   /** 按客户端实际读到的版本标记已读，防止并发更新被错误清除。 */
   @Transactional
@@ -504,6 +532,7 @@ public class DemandWorkflow {
             id);
       }
     }
+    notices.readForObject(userId, type, id);
   }
   /** 公示列表仅查询已发布的人工选定内容，不拼接原始表单正文。 */
   public List<Map<String, Object>> publications(Long userId, boolean includeArchived) {
@@ -581,6 +610,7 @@ public class DemandWorkflow {
   public void publish(String id, Map<String, Object> body, Long userId) {
     Map<String, Object> d = demand(id, userId, null, true);
     access.requireManage(d.get("formKey").toString(), userId);
+    approval.requireApproved(d);
     Map<String, Object> old =
         store.one("SELECT * FROM rm_demand_publication WHERE demand_id=? FOR UPDATE", id);
     long expected = number(body.getOrDefault("version", 0));
@@ -589,10 +619,12 @@ public class DemandWorkflow {
     boolean publish = flag(body.get("published"));
     if (publish) requireWorkflow(d.get("formKey").toString());
     if (!publish) {
-      if (old != null)
+      if (old != null) {
         store.update(
             "UPDATE rm_demand_publication SET published=FALSE,version=version+1,update_time=CURRENT_TIMESTAMP WHERE demand_id=?",
             id);
+        notices.deleteForPublication(String.valueOf(old.get("id")));
+      }
       message(id, userId, "AUDIT", "撤回公示");
       return;
     }
@@ -621,6 +653,7 @@ public class DemandWorkflow {
           id);
     store.update("UPDATE rm_demand SET publication_skipped=FALSE WHERE id=?", id);
     message(id, userId, "AUDIT", "审核并发布公示");
+    publishNotice(id, d, userId);
   }
   /** 按需求标题、采纳说明和最近正式回复生成公示；已发布时幂等跳过。 */
   @Transactional
@@ -628,6 +661,7 @@ public class DemandWorkflow {
     Map<String, Object> d = demand(id, userId, null, true);
     access.requireManage(d.get("formKey").toString(), userId);
     requireWorkflow(d.get("formKey").toString());
+    approval.requireApproved(d);
     checkRevision(d, revision);
     Map<String, Object> old =
         store.one("SELECT * FROM rm_demand_publication WHERE demand_id=? FOR UPDATE", id);
@@ -674,6 +708,7 @@ public class DemandWorkflow {
         "UPDATE rm_demand SET publication_skipped=FALSE,revision=revision+1,update_time=CURRENT_TIMESTAMP WHERE id=?",
         id);
     message(id, userId, "AUDIT", "自动生成并发布公示");
+    publishNotice(id, d, userId);
     result.put("published", true);
     result.put("unchanged", false);
     return result;
@@ -684,6 +719,7 @@ public class DemandWorkflow {
     Map<String, Object> d = demand(id, userId, null, true);
     access.requireManage(d.get("formKey").toString(), userId);
     requireWorkflow(d.get("formKey").toString());
+    approval.requireApproved(d);
     Map<String, Object> publication =
         store.one(
             "SELECT published,deleted_at FROM rm_demand_publication WHERE demand_id=? FOR UPDATE",
@@ -738,6 +774,7 @@ public class DemandWorkflow {
           "UPDATE rm_demand_publication SET archived_at=NULL,archived_by=NULL,version=version+1,update_time=CURRENT_TIMESTAMP WHERE id=?",
           publicationId);
     message(demandId, userId, "AUDIT", archived ? "归档公示" : "恢复公示");
+    if (archived) notices.deleteForPublication(publicationId);
   }
 
   /** 单据管理员删除公示；保留记录与审计，需求可重新发布或跳过。 */
@@ -764,6 +801,7 @@ public class DemandWorkflow {
         userId,
         publicationId);
     message(demandId, userId, "AUDIT", "删除公示");
+    notices.deleteForPublication(publicationId);
   }
 
   /** 验证附件属于该原始需求，不接受任意 URL 下载。 */
@@ -799,6 +837,17 @@ public class DemandWorkflow {
       throw new BaseException("公示前必须先发布明确的采纳结果（采纳/暂缓/不采纳）", 409);
   }
   /** 追加有来源的操作或回复。 */
+  /** 发布公示后按可见范围发送站内消息；排除操作人。 */
+  private void publishNotice(String demandId, Map<String, Object> demand, Long userId) {
+    Map<String, Object> publication =
+        store.one(
+            "SELECT id,demand_id,title,summary FROM rm_demand_publication WHERE demand_id=?",
+            demandId);
+    if (publication == null) return;
+    publication.put("formKey", demand.get("formKey"));
+    notices.publication(publication, userId);
+  }
+  /** 写入需求时间线消息。 */
   private void message(String id, Long userId, String kind, String content) {
     store.update(
         "INSERT INTO rm_demand_message(id,demand_id,author_id,author_name,kind,content) VALUES(?,?,?,?,?,?)",
