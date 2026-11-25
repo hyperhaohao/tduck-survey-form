@@ -147,7 +147,7 @@ public class DemandWorkflow {
       String submitEnd) {
     List<Object> args = new ArrayList<>();
     StringBuilder where = new StringBuilder(" WHERE f.is_deleted=FALSE ");
-    if ("managed".equals(scope)) access.requireConsoleAdmin(userId);
+    if ("managed".equals(scope)) access.requireDocumentManager(userId);
     DemandScope.apply(scope, userId, access.globalAdmin(userId), access.effectiveGrants(userId), where, args);
     if (keyword != null && !keyword.isEmpty()) {
       where.append(" AND (d.title LIKE ? OR d.request_no LIKE ? OR f.name LIKE ?)");
@@ -214,7 +214,7 @@ public class DemandWorkflow {
   public List<Map<String, Object>> summary(Long userId, String scope) {
     access.requireEnabled();
     if (userId == null) throw new BaseException("请先登录", 401);
-    if ("managed".equals(scope)) access.requireConsoleAdmin(userId);
+    if ("managed".equals(scope)) access.requireDocumentManager(userId);
     boolean global = access.globalAdmin(userId);
     DemandGrants grants = access.effectiveGrants(userId);
     List<Object> args = new ArrayList<>();

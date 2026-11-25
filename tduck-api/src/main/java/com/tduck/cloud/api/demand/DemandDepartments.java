@@ -17,9 +17,10 @@ public class DemandDepartments {
 
   /** 可授权部门列表，成员数包含下级部门。 */
   public List<Map<String, Object>> list(Long userId) {
-    access.requireConsoleAdmin(userId);
+    access.requireDocumentManager(userId);
     return store.rows(
-        "SELECT d.dept_key,d.name,d.parent_key,d.path,d.sort_no,"
+        "SELECT d.dept_key,d.name,d.parent_key,d.path,d.sort_no,d.leader_id,"
+            + "(SELECT u.name FROM ac_user u WHERE u.id=d.leader_id AND u.deleted=FALSE) AS leader_name,"
             + "(SELECT COUNT(DISTINCT ud.user_id) FROM rm_demand_user_dept ud "
             + "JOIN ac_user u ON u.id=ud.user_id AND u.deleted=FALSE "
             + "JOIN rm_demand_dept pd ON pd.dept_key=ud.dept_key AND pd.active=TRUE "
@@ -29,7 +30,7 @@ public class DemandDepartments {
 
   /** 部门成员名册：每个有效部门一条记录；未归属任何有效部门的成员 deptKey 为空。 */
   public List<Map<String, Object>> roster(Long userId) {
-    access.requireConsoleAdmin(userId);
+    access.requireDocumentManager(userId);
     return store.rows(
         "SELECT u.id AS user_id,u.name,d.dept_key FROM ac_user u "
             + "LEFT JOIN (SELECT ud.user_id,ud.dept_key FROM rm_demand_user_dept ud "
@@ -40,33 +41,45 @@ public class DemandDepartments {
   /** 新建部门。 */
   @Transactional
   public Map<String, Object> create(Map<String, Object> body, Long userId) {
-    access.requireConsoleAdmin(userId);
+    access.requireCapability(userId, DemandPermissions.ORG, "仅组织架构管理者可执行此操作");
     String name = required(body.get("name"), 100, "部门名称");
     String parentKey = text(body.get("parentKey"));
     if (parentKey != null) requireActiveDepartment(parentKey);
     requireSiblingNameFree(parentKey, name, null);
+    Long leaderId = leaderId(body.get("leaderId"));
+    if (leaderId != null) requireActiveUser(leaderId);
     String deptKey =
         "D" + UUID.randomUUID().toString().replace("-", "").substring(0, 10).toUpperCase(Locale.ROOT);
     store.update(
-        "INSERT INTO rm_demand_dept(dept_key,name,parent_key,path,sort_no,active) VALUES(?,?,?,?,?,TRUE)",
+        "INSERT INTO rm_demand_dept(dept_key,name,parent_key,path,sort_no,leader_id,active) VALUES(?,?,?,?,?,?,TRUE)",
         deptKey,
         name,
         parentKey,
         "/" + deptKey,
-        integer(body.get("sortNo")));
+        integer(body.get("sortNo")),
+        leaderId);
     rebuildPaths();
+    if (leaderId != null && store.count(
+            "SELECT COUNT(*) FROM rm_demand_user_dept WHERE user_id=? AND dept_key=?",
+            leaderId,
+            deptKey)
+        == 0)
+      store.update(
+          "INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(?,?)", leaderId, deptKey);
     return store.one(
-        "SELECT dept_key,name,parent_key,path,sort_no FROM rm_demand_dept WHERE dept_key=?",
+        "SELECT d.dept_key,d.name,d.parent_key,d.path,d.sort_no,d.leader_id,"
+            + "(SELECT u.name FROM ac_user u WHERE u.id=d.leader_id AND u.deleted=FALSE) AS leader_name "
+            + "FROM rm_demand_dept d WHERE d.dept_key=?",
         deptKey);
   }
 
-  /** 修改部门名称、上级或排序。 */
+  /** 修改部门名称、上级、排序或主管。 */
   @Transactional
   public void update(String deptKey, Map<String, Object> body, Long userId) {
-    access.requireConsoleAdmin(userId);
+    access.requireCapability(userId, DemandPermissions.ORG, "仅组织架构管理者可执行此操作");
     Map<String, Object> department =
         store.one(
-            "SELECT dept_key,name,parent_key,sort_no FROM rm_demand_dept WHERE dept_key=? AND active=TRUE",
+            "SELECT dept_key,name,parent_key,sort_no,leader_id FROM rm_demand_dept WHERE dept_key=? AND active=TRUE",
             deptKey);
     if (department == null) throw new BaseException("部门不存在或已停用");
     String name =
@@ -81,6 +94,10 @@ public class DemandDepartments {
         body.containsKey("sortNo")
             ? integer(body.get("sortNo"))
             : integer(department.get("sortNo"));
+    Long leaderId =
+        body.containsKey("leaderId")
+            ? leaderId(body.get("leaderId"))
+            : number(department.get("leaderId"));
     if (parentKey != null) {
       requireActiveDepartment(parentKey);
       if (parentKey.equals(deptKey)) throw new BaseException("不能把部门设置为自己的下级");
@@ -95,11 +112,13 @@ public class DemandDepartments {
       }
     }
     requireSiblingNameFree(parentKey, name, deptKey);
+    if (leaderId != null) requireDepartmentLeader(deptKey, leaderId);
     store.update(
-        "UPDATE rm_demand_dept SET name=?,parent_key=?,sort_no=? WHERE dept_key=?",
+        "UPDATE rm_demand_dept SET name=?,parent_key=?,sort_no=?,leader_id=? WHERE dept_key=?",
         name,
         parentKey,
         sortNo,
+        leaderId,
         deptKey);
     rebuildPaths();
   }
@@ -107,7 +126,7 @@ public class DemandDepartments {
   /** 删除没有下级、成员和收集单授权的部门。 */
   @Transactional
   public void delete(String deptKey, Long userId) {
-    access.requireConsoleAdmin(userId);
+    access.requireCapability(userId, DemandPermissions.ORG, "仅组织架构管理者可执行此操作");
     if (store.count(
             "SELECT COUNT(*) FROM rm_demand_dept WHERE dept_key=? AND active=TRUE", deptKey)
         == 0) throw new BaseException("部门不存在或已停用");
@@ -125,7 +144,7 @@ public class DemandDepartments {
   /** 把单个成员加入部门。 */
   @Transactional
   public void addMember(String deptKey, Long memberId, Long userId) {
-    access.requireConsoleAdmin(userId);
+    access.requireCapability(userId, DemandPermissions.ORG, "仅组织架构管理者可执行此操作");
     requireActiveDepartment(deptKey);
     requireActiveUser(memberId);
     if (store.count(
@@ -140,7 +159,7 @@ public class DemandDepartments {
   /** 从部门移除单个成员。 */
   @Transactional
   public void removeMember(String deptKey, Long memberId, Long userId) {
-    access.requireConsoleAdmin(userId);
+    access.requireCapability(userId, DemandPermissions.ORG, "仅组织架构管理者可执行此操作");
     store.update(
         "DELETE FROM rm_demand_user_dept WHERE user_id=? AND dept_key=?", memberId, deptKey);
   }
@@ -148,7 +167,7 @@ public class DemandDepartments {
   /** 整体设置成员的所属部门；空清单表示清空。 */
   @Transactional
   public void setUserDepartments(Long memberId, Map<String, Object> body, Long userId) {
-    access.requireConsoleAdmin(userId);
+    access.requireCapability(userId, DemandPermissions.ORG, "仅组织架构管理者可执行此操作");
     requireActiveUser(memberId);
     Set<String> deptKeys = new LinkedHashSet<>();
     for (Object value : items(body.get("deptKeys"))) {
@@ -174,6 +193,26 @@ public class DemandDepartments {
       throw new BaseException("成员不存在或已停用");
   }
 
+  private static Long leaderId(Object value) {
+    if (value == null) return null;
+    String text = value.toString().trim();
+    return text.isEmpty() ? null : Long.valueOf(text);
+  }
+
+  /** 部门主管必须是该部门或下级部门的在职成员。 */
+  private void requireDepartmentLeader(String deptKey, Long leaderIdValue) {
+    requireActiveUser(leaderIdValue);
+    long count =
+        store.count(
+            "SELECT COUNT(*) FROM rm_demand_user_dept ud "
+                + "JOIN rm_demand_dept pd ON pd.dept_key=ud.dept_key AND pd.active=TRUE "
+                + "JOIN rm_demand_dept gd ON gd.dept_key=? AND gd.active=TRUE "
+                + "WHERE ud.user_id=? AND (pd.path=gd.path OR LOCATE(CONCAT(gd.path,'/'),pd.path)=1)",
+            deptKey,
+            leaderIdValue);
+    if (count == 0) throw new BaseException("部门主管必须是该部门或下级部门成员", 400);
+  }
+
   private void requireSiblingNameFree(String parentKey, String name, String excludeKey) {
     List<Map<String, Object>> rows =
         parentKey == null
@@ -197,7 +236,6 @@ public class DemandDepartments {
 
   /** 收集单的部门授权。 */
   public List<Map<String, Object>> members(String key, Long userId) {
-    access.requireConsoleAdmin(userId);
     access.requireManage(key, userId);
     List<Map<String, Object>> rows =
         store.rows(
@@ -216,7 +254,6 @@ public class DemandDepartments {
   /** 保存部门授权；撤掉可管理时保证至少一名有效管理员。 */
   @Transactional
   public void save(String key, String deptKey, Map<String, Object> body, Long userId) {
-    access.requireConsoleAdmin(userId);
     access.requireManage(key, userId);
     if (store.one("SELECT form_key FROM rm_demand_form WHERE form_key=? FOR UPDATE", key) == null)
       throw new BaseException("请先保存需求收集配置");
@@ -251,7 +288,6 @@ public class DemandDepartments {
   /** 移除部门授权。 */
   @Transactional
   public void remove(String key, String deptKey, Long userId) {
-    access.requireConsoleAdmin(userId);
     access.requireManage(key, userId);
     Map<String, Object> old =
         store.one(

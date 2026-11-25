@@ -14,10 +14,11 @@ import org.springframework.transaction.annotation.Transactional;
 public class DemandForms {
   private final DemandStore store;
   private final DemandAccess access;
+  private final DemandPermissions permissions;
   /** 查询当前身份可见的收集单，管理查询不公开名单。 */
   public List<Map<String, Object>> list(Long userId, boolean management) {
     access.requireEnabled();
-    if (management) access.requireConsoleAdmin(userId);
+    if (management) access.requireDocumentManager(userId);
     boolean global = access.globalAdmin(userId);
     StringBuilder sql =
         new StringBuilder(
@@ -106,7 +107,6 @@ public class DemandForms {
   /** 设置独立业务收集配置，不能将指定人员收集单同时开放匿名。 */
   @Transactional
   public void configure(String key, Map<String, Object> body, Long userId) {
-    access.requireConsoleAdmin(userId);
     if (store.count("SELECT COUNT(*) FROM fm_user_form WHERE form_key=? AND is_deleted=FALSE", key)
         == 0) throw new BaseException("表单不存在");
     if (!access.globalAdmin(userId) && !access.manage(key, userId) && !access.owner(key, userId))
@@ -189,7 +189,6 @@ public class DemandForms {
   /** 作废后停止新填报并从员工入口隐藏，需求历史保留，可恢复。 */
   @Transactional
   public void setVoided(String key, boolean voided, Long userId) {
-    access.requireConsoleAdmin(userId);
     if (!access.globalAdmin(userId) && !access.manage(key, userId) && !access.owner(key, userId))
       throw new BaseException("仅该收集单的创建人或单据管理员可执行此操作", 403);
     int rows =
@@ -217,7 +216,6 @@ public class DemandForms {
   /** 逻辑删除收集单到全局回收站；需求、答卷和附件保留。 */
   @Transactional
   public Map<String, Object> deleteCollection(String key, Long userId) {
-    access.requireConsoleAdmin(userId);
     if (!access.globalAdmin(userId) && !access.manage(key, userId) && !access.owner(key, userId))
       throw new BaseException("仅该收集单的创建人或单据管理员可执行此操作", 403);
     if (store.count("SELECT COUNT(*) FROM fm_user_form WHERE form_key=?", key) == 0)
@@ -241,7 +239,6 @@ public class DemandForms {
   /** 从全局回收站恢复收集单。 */
   @Transactional
   public void restoreCollection(String key, Long userId) {
-    access.requireConsoleAdmin(userId);
     if (!access.globalAdmin(userId) && !access.manage(key, userId) && !access.owner(key, userId))
       throw new BaseException("仅该收集单的创建人或单据管理员可执行此操作", 403);
     if (store.count(
@@ -300,7 +297,6 @@ public class DemandForms {
   }
   /** 查看具名权限。 */
   public List<Map<String, Object>> members(String key, Long userId) {
-    access.requireConsoleAdmin(userId);
     access.requireManage(key, userId);
     List<Map<String, Object>> rows =
         store.rows(
@@ -336,7 +332,6 @@ public class DemandForms {
   /** 分别授权填报、经办与管理能力，撤权立即影响后续访问及待办。 */
   @Transactional
   public void member(String key, Long memberId, Map<String, Object> body, Long userId) {
-    access.requireConsoleAdmin(userId);
     access.requireManage(key, userId);
     if (store.one("SELECT form_key FROM rm_demand_form WHERE form_key=? FOR UPDATE", key) == null)
       throw new BaseException("请先保存需求收集配置");
@@ -366,7 +361,6 @@ public class DemandForms {
   /** 移除成员授权；最后一名单据管理员不可移除。 */
   @Transactional
   public void removeMember(String key, Long memberId, Long userId) {
-    access.requireConsoleAdmin(userId);
     access.requireManage(key, userId);
     if (store.one("SELECT form_key FROM rm_demand_form WHERE form_key=? FOR UPDATE", key) == null)
       throw new BaseException("请先保存需求收集配置");
@@ -380,27 +374,53 @@ public class DemandForms {
   }
   /** 管理页面仅返回必要的账户标识和姓名。 */
   public List<Map<String, Object>> users(String keyword, Long userId) {
-    access.requireConsoleAdmin(userId);
+    access.requireDocumentManager(userId);
     String q = keyword == null ? "" : keyword;
     return store.rows(
         "SELECT id,name FROM ac_user WHERE deleted=FALSE AND (name LIKE ? OR CAST(id AS CHAR) LIKE ?) ORDER BY name LIMIT 200",
         "%" + q + "%",
         "%" + q + "%");
   }
-  /** 查看需求模块额外管理员，不返回认证信息。 */
+  /** 旧接口兼容：列出拥有单据管理能力的用户，不返回认证信息。 */
   public List<Map<String, Object>> admins(Long userId) {
     access.requireGlobalAdmin(userId);
-    return store.rows(
-        "SELECT a.user_id,u.name FROM rm_demand_admin a JOIN ac_user u ON u.id=a.user_id");
+    List<Map<String, Object>> result = new ArrayList<>();
+    for (Map<String, Object> row : permissions.users()) {
+      Object raw = row.get("capabilities");
+      if (raw instanceof List && ((List<?>) raw).contains(DemandPermissions.FORM_MANAGE)) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("userId", row.get("userId"));
+        item.put("name", row.get("name"));
+        result.add(item);
+      }
+    }
+    return result;
   }
-  /** 显式增加或撤销管理能力，禁止误撤当前管理会话的能力。 */
+  /** 旧接口兼容：授予默认单据管理能力，或撤销全部平台能力。 */
   @Transactional
   public void admin(Long memberId, boolean grant, Long userId) {
     access.requireGlobalAdmin(userId);
     if (memberId.equals(userId) && !grant) throw new BaseException("不能在当前会话撤销自己的管理权限");
-    if (store.count("SELECT COUNT(*) FROM ac_user WHERE id=? AND deleted=FALSE", memberId) == 0)
-      throw new BaseException("用户不存在或已停用");
-    store.update("DELETE FROM rm_demand_admin WHERE user_id=?", memberId);
-    if (grant) store.update("INSERT INTO rm_demand_admin(user_id) VALUES(?)", memberId);
+    if (grant) permissions.grantDefaults(memberId, userId);
+    else permissions.revokeAll(memberId, userId);
+  }
+  /** 平台权限矩阵：能力定义、全局专属说明与已授权用户。 */
+  public Map<String, Object> permissionMatrix(Long userId) {
+    access.requireGlobalAdmin(userId);
+    Map<String, Object> result = new LinkedHashMap<>();
+    result.put("capabilities", DemandPermissions.definitions());
+    result.put("globalOnly", DemandPermissions.globalOnly());
+    result.put("users", permissions.users());
+    return result;
+  }
+  /** 整体保存用户平台能力；空数组表示撤销。 */
+  @Transactional
+  public void savePermissions(Long memberId, Map<String, Object> body, Long userId) {
+    access.requireGlobalAdmin(userId);
+    Object raw = body.get("capabilities");
+    if (!(raw instanceof List)) throw new BaseException("能力清单无效");
+    List<String> capabilities = new ArrayList<>();
+    for (Object value : (List<?>) raw) capabilities.add(value == null ? "" : value.toString());
+    permissions.replace(memberId, capabilities, userId);
   }
 }

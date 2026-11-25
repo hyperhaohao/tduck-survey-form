@@ -18,6 +18,7 @@
 - `sys_env_config` 更新：`fileEnvConfig.domain=http://wanghao.yun:93/u`、`systemInfoConfig.webBaseUrl=http://wanghao.yun:93`；`jwtEnvConfig` 已生成 237 独立新密钥；`deepSeekEnvConfig` 随库迁移，AI 仍指向 236 的 New API 网关。
 - 迁移转储含 AI Key 与密码哈希，仅在受限目录临时保存，导入后已删除；未写入普通目录或 Git。
 - `rm_demand_identity` 的 issuer 仍为 `http://192.168.1.237:13004`，`ruima-admin` 到本地 `ac_user.id=1` 的映射继续有效。
+- 2026-11-25 待部署（权限细分与部门主管）：先备份，再依次执行 `doc/ruima-demand-migration-20261125-capability.sql`（新建 `rm_demand_permission` 并迁移存量后台管理员为 `form.manage`）与 `doc/ruima-demand-migration-20261125-dept-leader.sql`（新增 `rm_demand_dept.leader_id`），然后部署后端、前端。部署后 `/demand/admin` 仅全局管理员，存量后台管理员改用 `/demand/manage`「单据管理」页；组织架构与用户管理需在“平台权限授权”另行授予。回滚保留 `rm_demand_admin` 与 `user_id=0` 锁行，新表不删除。
 
 ## 三、Casdoor
 

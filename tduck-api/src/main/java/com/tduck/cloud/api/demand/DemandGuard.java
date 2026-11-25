@@ -25,7 +25,8 @@ public class DemandGuard implements HandlerInterceptor {
     Long userId = number(r.getAttribute("userId"));
     if (path.startsWith("/ai/")) {
       access.requireActive(userId);
-      if (!access.consoleAdmin(userId)) throw new BaseException("仅后台管理员可使用 AI 功能", 403);
+      if (!access.capability(userId, DemandPermissions.FORM_MANAGE))
+        throw new BaseException("仅拥有单据管理权限的账户可使用 AI 功能", 403);
     }
     if (!access.enabled()) return true;
     HandlerMethod method = (HandlerMethod) handler;
@@ -34,8 +35,9 @@ public class DemandGuard implements HandlerInterceptor {
         method.hasMethodAnnotation(PermitAll.class) || method.hasMethodAnnotation(NotLogin.class);
     if (path.startsWith("/user/form") && !publicMethod && !path.equals("/user/form/data/create")) {
       if (!access.globalAdmin(userId)
-          && !(access.consoleAdmin(userId) && consoleFormAllowed(path)))
-        throw new BaseException("仅全局管理员可执行此操作", 403);
+          && !(access.capability(userId, DemandPermissions.FORM_MANAGE)
+              && consoleFormAllowed(path)))
+        throw new BaseException("仅拥有单据管理权限的账户可执行此操作", 403);
     }
     if (path.startsWith("/user/form/details/")
         || path.startsWith("/user/form/public/settings/")
@@ -47,7 +49,7 @@ public class DemandGuard implements HandlerInterceptor {
     return true;
   }
 
-  /** 后台管理员可用的建单与原表单设计入口（含表单级通知设置）；未列出的仍仅全局管理员。 */
+  /** 拥有单据管理能力可用的建单与设计入口（含表单级设置）；未列出的仍仅全局管理员。 */
   private boolean consoleFormAllowed(String path) {
     if (path.equals("/user/form/create")
         || path.equals("/user/form/use-template/create")

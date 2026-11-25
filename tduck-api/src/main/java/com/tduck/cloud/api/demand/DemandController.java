@@ -209,6 +209,18 @@ public class DemandController {
     forms.admin(memberId, flag(body.get("grant")), user(r));
     return Result.success();
   }
+  /** 平台权限矩阵：能力定义、全局专属说明与已授权用户。 */
+  @GetMapping("/admin/permissions")
+  public Result<?> permissions(HttpServletRequest r) {
+    return Result.success(forms.permissionMatrix(user(r)));
+  }
+  /** 整体保存用户平台能力；空数组表示撤销。 */
+  @PostMapping("/admin/permissions/{memberId}")
+  public Result<?> savePermissions(
+      @PathVariable Long memberId, @RequestBody Map<String, Object> body, HttpServletRequest r) {
+    forms.savePermissions(memberId, body, user(r));
+    return Result.success();
+  }
   /** 分页需求列表。 */
   @GetMapping("/requests")
   public Result<?> requests(

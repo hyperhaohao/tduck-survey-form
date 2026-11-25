@@ -76,8 +76,9 @@ public class AuthorizationInterceptor extends HandlerInterceptorAdapter {
         request.setAttribute(USER_KEY, userId);
 
         String path = urlPathHelper.getLookupPathForRequest(request);
-        // 不允许访问
-        if (pathMatcher.match("/mange/**", path) || pathMatcher.match("/system/env/**", path)) {
+        // 不允许访问；用户管理页由 UserManageController 按 user.manage 单独校验。
+        if ((pathMatcher.match("/mange/**", path) && !pathMatcher.match("/mange/user/**", path))
+                || pathMatcher.match("/system/env/**", path)) {
             if (!SecurityUtils.isAdmin(userId)) {
                 throw new AuthorizationException("无权限访问");
             }

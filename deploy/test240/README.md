@@ -2,6 +2,8 @@
 
 **瑞玛需求征集已在 http://192.168.1.240:18000 部署，沿用原填鸭界面风格，默认登录填写、可选匿名。** 本目录保留无凭据部署模板；实际配置由服务器受限运行目录维护，不复制到仓库。
 
+**2026-11-25 权限细分与部门主管尚未部署到 240。** 如需更新，先备份，再依次执行 `doc/ruima-demand-migration-20261125-capability.sql` 与 `doc/ruima-demand-migration-20261125-dept-leader.sql`，然后部署后端、前端；240 仍作为回退环境，不承接 11-17 之后的日常更新。
+
 ## 一、运行配置
 
 - Compose：`/data/apps/ruima-survey-test/compose.yaml`，项目名 `ruima-survey-test`。

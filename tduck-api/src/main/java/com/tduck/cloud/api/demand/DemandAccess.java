@@ -17,6 +17,7 @@ public class DemandAccess {
   private final DemandStore store;
   private final DemandProperties properties;
   private final UserService users;
+  private final DemandPermissions permissions;
   /** 模块是否启用。 */
   public boolean enabled() {
     return properties.isEnabled();
@@ -27,12 +28,27 @@ public class DemandAccess {
         && (SecurityUtils.isAdmin(userId)
             || (enabled() && properties.getAdminIds().contains(userId)));
   }
-  /** 后台管理员：可进入后台并建单，数据仍按收集单授权。 */
+  /** 平台能力点判定；全局管理员恒真。 */
+  public boolean capability(Long userId, String capability) {
+    if (globalAdmin(userId)) return true;
+    if (userId == null || !enabled()) return false;
+    return permissions.has(userId, capability);
+  }
+  /** 单据管理页准入：单据管理、组织架构或任一收集单的单据管理员。 */
+  public boolean documentManager(Long userId) {
+    if (globalAdmin(userId)) return true;
+    if (userId == null || !enabled()) return false;
+    if (capability(userId, DemandPermissions.FORM_MANAGE)
+        || capability(userId, DemandPermissions.ORG)) return true;
+    return effectiveGrants(userId).anyManage();
+  }
+  /** 用户管理页准入：用户管理能力或全局管理员。 */
+  public boolean userManager(Long userId) {
+    return globalAdmin(userId) || capability(userId, DemandPermissions.USER_MANAGE);
+  }
+  /** 兼容别名：旧“后台管理员”语义已由单据管理页替代。 */
   public boolean consoleAdmin(Long userId) {
-    return globalAdmin(userId)
-        || (userId != null
-            && enabled()
-            && store.count("SELECT COUNT(*) FROM rm_demand_admin WHERE user_id=?", userId) > 0);
+    return documentManager(userId);
   }
   /** 本地账户停用后立即拒绝访问，不等令牌自然过期。 */
   public void requireActive(Long userId) {
@@ -49,10 +65,23 @@ public class DemandAccess {
     requireEnabled();
     if (!globalAdmin(userId)) throw new BaseException("仅全局管理员可执行此操作", 403);
   }
-  /** 要求后台管理员权限，具体数据范围仍由收集单授权决定。 */
-  public void requireConsoleAdmin(Long userId) {
+  /** 要求指定平台能力。 */
+  public void requireCapability(Long userId, String capability, String message) {
     requireEnabled();
-    if (!consoleAdmin(userId)) throw new BaseException("仅后台管理员可执行此操作", 403);
+    if (!capability(userId, capability)) throw new BaseException(message, 403);
+  }
+  /** 要求单据管理页准入。 */
+  public void requireDocumentManager(Long userId) {
+    requireEnabled();
+    if (!documentManager(userId)) throw new BaseException("仅单据管理者可执行此操作", 403);
+  }
+  /** 要求用户管理页准入；模块关闭时原超级管理员仍可维护本地用户。 */
+  public void requireUserManager(Long userId) {
+    if (!userManager(userId)) throw new BaseException("仅用户管理者可执行此操作", 403);
+  }
+  /** 兼容别名：后台管理员入口已改为单据管理页。 */
+  public void requireConsoleAdmin(Long userId) {
+    requireDocumentManager(userId);
   }
   /** 查询收集单扩展配置。 */
   public Map<String, Object> form(String key) {
@@ -200,17 +229,35 @@ public class DemandAccess {
     m.put("enabled", enabled());
     if (!enabled() || userId == null) {
       m.put("admin", false);
+      m.put("documentAccess", false);
+      m.put("formManage", false);
+      m.put("org", false);
+      m.put("userManage", false);
       m.put("global", false);
       m.put("handler", false);
       m.put("manage", false);
+      m.put("granted", Collections.emptyList());
+      m.put("permissionApi", true);
       return m;
     }
     boolean global = globalAdmin(userId);
     DemandGrants grants = effectiveGrants(userId);
-    m.put("admin", consoleAdmin(userId));
+    Set<String> platform =
+        global ? DemandPermissions.GRANTABLE : permissions.granted(userId);
+    boolean formManage = global || platform.contains(DemandPermissions.FORM_MANAGE);
+    boolean org = global || platform.contains(DemandPermissions.ORG);
+    boolean userManage = global || platform.contains(DemandPermissions.USER_MANAGE);
+    boolean documentAccess = formManage || org || grants.anyManage();
+    m.put("admin", documentAccess);
+    m.put("documentAccess", documentAccess);
+    m.put("formManage", formManage);
+    m.put("org", org);
+    m.put("userManage", userManage);
     m.put("global", global);
     m.put("handler", grants.anyHandle());
     m.put("manage", global || grants.anyManage());
+    m.put("granted", new ArrayList<>(platform));
+    m.put("permissionApi", true);
     m.put(
         "mineUnread",
         store.count(

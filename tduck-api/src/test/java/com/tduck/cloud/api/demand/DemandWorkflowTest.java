@@ -39,6 +39,7 @@ class DemandWorkflowTest {
   DemandExport export;
   DemandSubmission submission;
   DemandProperties properties;
+  DemandPermissions permissions;
   UserService users;
   UserFormItemService fields;
   TransactionTemplate tx;
@@ -90,9 +91,10 @@ class DemandWorkflowTest {
             });
     properties = new DemandProperties();
     properties.setEnabled(true);
-    access = new DemandAccess(store, properties, users);
+    permissions = new DemandPermissions(store, properties);
+    access = new DemandAccess(store, properties, users, permissions);
     formFields = new DemandFormFields(store);
-    forms = new DemandForms(store, access);
+    forms = new DemandForms(store, access, permissions);
     departments = new DemandDepartments(store, access);
     UserFormItemService fields = mock(UserFormItemService.class);
     when(fields.listFormFields(anyString())).thenReturn(Collections.emptyList());
@@ -107,6 +109,14 @@ class DemandWorkflowTest {
     Map<String, Object> m = new LinkedHashMap<>();
     for (int i = 0; i < pairs.length; i += 2) m.put(pairs[i].toString(), pairs[i + 1]);
     return m;
+  }
+
+  private void grant(long userId, String... capabilities) {
+    for (String capability : capabilities)
+      jdbc.update(
+          "INSERT INTO rm_demand_permission(user_id,capability) VALUES(?,?)",
+          userId,
+          capability);
   }
 
   private String create(long dataId, Long userId, boolean anonymous) {
@@ -326,7 +336,7 @@ class DemandWorkflowTest {
 
   @Test
   void departmentManageGrantScopesConsoleAdminForms() {
-    jdbc.update("INSERT INTO rm_demand_admin(user_id) VALUES(60)");
+    grant(60, DemandPermissions.FORM_MANAGE);
     jdbc.update("INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(60,'D3')");
     departments.save("A", "D3", body("canManage", true), 1L);
     create(100, 10L, false);
@@ -635,7 +645,7 @@ class DemandWorkflowTest {
     assertEquals(
         1L, workflow.list(50L, "table", "", "", "", "", "", "", "", 1, 20).get("total"));
     assertEquals(2, forms.handlers("A", 50L).size());
-    assertThrows(BaseException.class, () -> forms.members("A", 50L));
+    assertTrue(forms.members("A", 50L).stream().anyMatch(row -> number(row.get("userId")) == 50L));
     assertThrows(BaseException.class, () -> forms.handlers("A", 40L));
   }
 
@@ -914,7 +924,7 @@ class DemandWorkflowTest {
 
   @Test
   void assignedAdminSeesOnlyManagedFormsAndCanCreate() {
-    jdbc.update("INSERT INTO rm_demand_admin(user_id) VALUES(60)");
+    grant(60, DemandPermissions.FORM_MANAGE);
     assertTrue(access.consoleAdmin(60L));
     assertFalse(access.globalAdmin(60L));
     assertFalse(access.manage("A", 60L));
@@ -941,7 +951,7 @@ class DemandWorkflowTest {
 
   @Test
   void managedScopeRequiresConsoleAndFiltersForms() throws Exception {
-    jdbc.update("INSERT INTO rm_demand_admin(user_id) VALUES(60)");
+    grant(60, DemandPermissions.FORM_MANAGE);
     String id = create(100, 10L, false);
     assertEquals(
         0L, workflow.list(60L, "managed", "", "", "", "", "", "", "", 1, 20).get("total"));
@@ -963,12 +973,171 @@ class DemandWorkflowTest {
   @Test
   void managementExtensionOnlyGrantsConsoleManagers() {
     DemandManagementExtension extension = new DemandManagementExtension(access);
-    jdbc.update("INSERT INTO rm_demand_admin(user_id) VALUES(60)");
+    grant(60, DemandPermissions.FORM_MANAGE);
     assertFalse(extension.canManage(60L, "A"));
     forms.member("A", 60L, body("canManage", true), 1L);
     assertTrue(extension.canManage(60L, "A"));
     assertFalse(extension.canManage(30L, "A"));
     assertTrue(extension.canManage(1L, "A"));
+  }
+
+  @Test
+  void platformCapabilitiesGateAccessWithoutExpandingFormScope() {
+    grant(60, DemandPermissions.FORM_MANAGE);
+    assertTrue(access.documentManager(60L));
+    assertFalse(access.userManager(60L));
+    assertEquals(true, access.capabilities(60L).get("formManage"));
+    assertEquals(false, access.capabilities(60L).get("org"));
+    assertEquals(false, access.capabilities(60L).get("userManage"));
+
+    assertTrue(access.documentManager(50L));
+    assertFalse(access.capability(50L, DemandPermissions.FORM_MANAGE));
+    assertFalse(access.userManager(50L));
+
+    grant(40, DemandPermissions.ORG);
+    assertTrue(access.documentManager(40L));
+    assertTrue(access.capability(40L, DemandPermissions.ORG));
+    assertFalse(access.capability(40L, DemandPermissions.FORM_MANAGE));
+    assertThrows(
+        BaseException.class,
+        () -> forms.configure("A", body("visibility", "LOGIN", "allowAnonymous", false), 40L));
+
+    grant(30, DemandPermissions.USER_MANAGE);
+    assertTrue(access.userManager(30L));
+    assertFalse(access.documentManager(30L));
+  }
+
+  @Test
+  void documentManagerCanManageOwnFormWithoutCreate() throws Exception {
+    assertFalse(forms.members("A", 50L).isEmpty());
+    Map<String, Object> current = access.form("A");
+    forms.configure(
+        "A",
+        body(
+            "visibility",
+            "LOGIN",
+            "allowAnonymous",
+            false,
+            "revision",
+            current.get("revision")),
+        50L);
+    forms.setVoided("A", true, 50L);
+    forms.setVoided("A", false, 50L);
+    assertFalse(access.capability(50L, DemandPermissions.FORM_MANAGE));
+
+    DemandGuard guard = new DemandGuard(access);
+    MockHttpServletRequest r = new MockHttpServletRequest();
+    r.setServletPath("/user/form/create");
+    r.setAttribute("userId", 50L);
+    HandlerMethod method =
+        new HandlerMethod(
+            mock(UserFormController.class),
+            UserFormController.class.getMethod(
+                "createForm", com.tduck.cloud.form.entity.UserFormEntity.class, Long.class));
+    assertThrows(
+        BaseException.class, () -> guard.preHandle(r, new MockHttpServletResponse(), method));
+  }
+
+  @Test
+  void departmentLeaderStoredAndValidated() {
+    jdbc.update("INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(40,'D1')");
+    Map<String, Object> created =
+        departments.create(body("name", "新部门", "parentKey", "R", "leaderId", 30L), 1L);
+    assertEquals("30", String.valueOf(created.get("leaderId")));
+    assertEquals("人员30", created.get("leaderName"));
+    assertEquals(
+        1L,
+        store.count(
+            "SELECT COUNT(*) FROM rm_demand_user_dept WHERE user_id=30 AND dept_key=?",
+            created.get("deptKey")));
+
+    departments.update("D1", body("leaderId", 40L), 1L);
+    Map<String, Object> row =
+        store.one(
+            "SELECT d.leader_id,u.name AS leader_name FROM rm_demand_dept d "
+                + "LEFT JOIN ac_user u ON u.id=d.leader_id WHERE d.dept_key='D1'");
+    assertEquals("40", String.valueOf(row.get("leaderId")));
+    assertEquals("人员40", row.get("leaderName"));
+
+    assertThrows(BaseException.class, () -> departments.update("D1", body("leaderId", 30L), 1L));
+    assertThrows(
+        BaseException.class, () -> departments.create(body("name", "无权限部门"), 60L));
+    grant(60, DemandPermissions.ORG);
+    assertNotNull(departments.create(body("name", "组织部门"), 60L));
+  }
+
+  @Test
+  void userManageCapabilityGatesUserManagerOnly() {
+    assertFalse(access.userManager(60L));
+    grant(60, DemandPermissions.USER_MANAGE);
+    assertTrue(access.userManager(60L));
+    assertFalse(access.documentManager(60L));
+    Map<String, Object> capabilities = access.capabilities(60L);
+    assertEquals(true, capabilities.get("userManage"));
+    assertEquals(false, capabilities.get("documentAccess"));
+  }
+
+  @Test
+  void permissionReplaceValidatesAndMirrorsLegacyTable() {
+    permissions.replace(
+        60L, Arrays.asList(DemandPermissions.FORM_MANAGE, DemandPermissions.ORG), 1L);
+    assertTrue(access.capability(60L, DemandPermissions.FORM_MANAGE));
+    assertTrue(access.capability(60L, DemandPermissions.ORG));
+    assertEquals(
+        1L, store.count("SELECT COUNT(*) FROM rm_demand_admin WHERE user_id=60"));
+
+    assertThrows(
+        BaseException.class,
+        () -> permissions.replace(60L, Collections.singletonList("global.admin"), 1L));
+    assertTrue(access.capability(60L, DemandPermissions.FORM_MANAGE));
+
+    permissions.replace(60L, Collections.emptyList(), 1L);
+    assertFalse(access.capability(60L, DemandPermissions.FORM_MANAGE));
+    assertFalse(access.capability(60L, DemandPermissions.ORG));
+    assertEquals(
+        0L, store.count("SELECT COUNT(*) FROM rm_demand_admin WHERE user_id=60"));
+  }
+
+  @Test
+  void legacyRoleEndpointKeepsOtherCapabilities() {
+    permissions.replace(60L, Collections.singletonList(DemandPermissions.ORG), 1L);
+    forms.admin(60L, true, 1L);
+    assertTrue(access.capability(60L, DemandPermissions.FORM_MANAGE));
+    assertTrue(access.capability(60L, DemandPermissions.ORG));
+    assertTrue(
+        forms.admins(1L).stream()
+            .anyMatch(row -> "60".equals(String.valueOf(row.get("userId")))));
+
+    forms.admin(60L, false, 1L);
+    assertFalse(access.capability(60L, DemandPermissions.FORM_MANAGE));
+    assertFalse(access.capability(60L, DemandPermissions.ORG));
+  }
+
+  @Test
+  void permissionMatrixListsDefinitionsAndUsers() {
+    permissions.replace(
+        60L, Arrays.asList(DemandPermissions.FORM_MANAGE, DemandPermissions.USER_MANAGE), 1L);
+    Map<String, Object> matrix = forms.permissionMatrix(1L);
+    assertEquals(3, ((List<?>) matrix.get("capabilities")).size());
+    @SuppressWarnings("unchecked")
+    List<Map<String, Object>> users = (List<Map<String, Object>>) matrix.get("users");
+    assertTrue(users.stream().anyMatch(row -> "60".equals(String.valueOf(row.get("userId")))));
+    assertThrows(BaseException.class, () -> forms.permissionMatrix(60L));
+  }
+
+  @Test
+  void legacyAdminMigrationCopiesFormManageOnlyAndIsIdempotent() throws Exception {
+    jdbc.update("INSERT INTO rm_demand_admin(user_id) VALUES(60)");
+    for (int i = 0; i < 2; i++)
+      ScriptUtils.executeSqlScript(
+          jdbc.getDataSource().getConnection(),
+          new FileSystemResource("../doc/ruima-demand-migration-20261125-capability.sql"));
+    assertTrue(access.capability(60L, DemandPermissions.FORM_MANAGE));
+    assertFalse(access.capability(60L, DemandPermissions.ORG));
+    assertEquals(
+        1L,
+        store.count(
+            "SELECT COUNT(*) FROM rm_demand_permission WHERE user_id=60 AND capability='form.manage'"));
   }
 
   @Test
@@ -990,7 +1159,7 @@ class DemandWorkflowTest {
   }
 
   @Test
-  void voidedCollectionStopsFillingAndRestores() {    jdbc.update("INSERT INTO rm_demand_admin(user_id) VALUES(60)");
+  void voidedCollectionStopsFillingAndRestores() {    grant(60, DemandPermissions.FORM_MANAGE);
     forms.member("A", 60L, body("canManage", true), 1L);
     assertThrows(BaseException.class, () -> forms.setVoided("A", true, 30L));
     forms.setVoided("A", true, 60L);
@@ -1006,7 +1175,7 @@ class DemandWorkflowTest {
 
   @Test
   void globalAdminDeletesRestoresAndPurgesCollections() {
-    jdbc.update("INSERT INTO rm_demand_admin(user_id) VALUES(60)");
+    grant(60, DemandPermissions.FORM_MANAGE);
     create(100, 10L, false);
     assertEquals(1L, store.count("SELECT COUNT(*) FROM rm_demand WHERE form_key='A'"));
     Map<String, Object> deleted = forms.deleteCollection("A", 1L);
@@ -1359,7 +1528,7 @@ class DemandWorkflowTest {
                 "createForm", com.tduck.cloud.form.entity.UserFormEntity.class, Long.class));
     assertThrows(
         BaseException.class, () -> guard.preHandle(r, new MockHttpServletResponse(), method));
-    jdbc.update("INSERT INTO rm_demand_admin(user_id) VALUES(60)");
+    grant(60, DemandPermissions.FORM_MANAGE);
     r.setAttribute("userId", 60L);
     assertTrue(guard.preHandle(r, new MockHttpServletResponse(), method));
     r.setServletPath("/user/form/item/create");
@@ -1742,9 +1911,72 @@ class DemandWorkflowTest {
   }
 
   @Test
+  void userManageEndpointsRequireCapabilityAndIgnorePasswordOnUpdate() throws Exception {
+    grant(30, DemandPermissions.USER_MANAGE);
+    when(users.page(any(), any())).thenReturn(null);
+    when(users.updateById(any())).thenReturn(true);
+    com.tduck.cloud.account.util.JwtUtils jwt = mock(com.tduck.cloud.account.util.JwtUtils.class);
+    when(jwt.getHeader()).thenReturn("token");
+    when(jwt.getClaimByToken(anyString()))
+        .thenAnswer(
+            i -> {
+              String token = i.getArgument(0);
+              if (!token.matches("qa[0-9]+")) return null;
+              io.jsonwebtoken.Claims claims = mock(io.jsonwebtoken.Claims.class);
+              when(claims.getSubject()).thenReturn(token.substring(2));
+              when(claims.getExpiration()).thenReturn(new Date(System.currentTimeMillis() + 60000));
+              return claims;
+            });
+    com.tduck.cloud.account.service.UserTokenService sessions =
+        mock(com.tduck.cloud.account.service.UserTokenService.class);
+    when(sessions.verifyToken(anyString(), anyLong())).thenReturn(true);
+    org.springframework.test.web.servlet.MockMvc mvc =
+        org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(
+                new com.tduck.cloud.api.web.controller.UserManageController(users, access))
+            .setControllerAdvice(new com.tduck.cloud.api.exception.BaseExceptionHandler())
+            .addInterceptors(new com.tduck.cloud.api.web.interceptor.AuthorizationInterceptor(jwt, sessions))
+            .build();
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get(
+                "/mange/user/page"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
+                .value(401));
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get(
+                    "/mange/user/page")
+                .header("token", "qa20"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
+                .value(403));
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get(
+                    "/mange/user/page")
+                .header("token", "qa30"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
+                .value(200));
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                    "/mange/user/update")
+                .header("token", "qa30")
+                .contentType("application/json")
+                .content("{\"id\":30,\"name\":\"新名字\",\"password\":\"should-not-change\"}"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
+                .value(200));
+    org.mockito.ArgumentCaptor<UserEntity> captor =
+        org.mockito.ArgumentCaptor.forClass(UserEntity.class);
+    verify(users).updateById(captor.capture());
+    assertNull(captor.getValue().getPassword());
+    assertNull(captor.getValue().getPasswordType());
+    assertNull(captor.getValue().getNeedChangePassword());
+  }
+
+  @Test
   void httpEndpointsApplyRealAuthorizationInterceptor() throws Exception {
     String id = create(100, 10L, false);
-    jdbc.update("INSERT INTO rm_demand_admin(user_id) VALUES(60)");
+    grant(60, DemandPermissions.FORM_MANAGE);
     assignTo(id, 30);
     String deletedId = create(101, 10L, false);
     assignTo(deletedId, 30);
@@ -1856,6 +2088,41 @@ class DemandWorkflowTest {
         .andExpect(
             org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
                 .value(403));
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get(
+                    "/demand-api/admin/permissions")
+                .header("token", "qa60"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
+                .value(403));
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get(
+                    "/demand-api/admin/permissions")
+                .header("token", "qa1"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
+                .value(200))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath(
+                    "$.data.capabilities.length()")
+                .value(3));
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                    "/demand-api/admin/permissions/30")
+                .header("token", "qa1")
+                .contentType("application/json")
+                .content("{\"capabilities\":[\"org\"]}"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
+                .value(200));
+    assertTrue(access.capability(30L, DemandPermissions.ORG));
+    mvc.perform(
+            org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get(
+                    "/demand-api/admin/forms")
+                .header("token", "qa30"))
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
+                .value(200));
     mvc.perform(
             org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get(
                     "/demand-api/requests")

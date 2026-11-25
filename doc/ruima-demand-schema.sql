@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS rm_demand_acl (
 CREATE TABLE IF NOT EXISTS rm_demand_dept (
  dept_key VARCHAR(64) PRIMARY KEY, name VARCHAR(100) NOT NULL, parent_key VARCHAR(64) NULL,
  path VARCHAR(512) NOT NULL, sort_no INT NOT NULL DEFAULT 0, active BOOLEAN NOT NULL DEFAULT TRUE,
- synced_at TIMESTAMP NULL
+ leader_id BIGINT NULL, synced_at TIMESTAMP NULL
 );
 CREATE INDEX idx_rm_demand_dept_parent ON rm_demand_dept(parent_key);
 CREATE INDEX idx_rm_demand_dept_path ON rm_demand_dept(path);
@@ -32,6 +32,11 @@ CREATE TABLE IF NOT EXISTS rm_demand_acl_dept (
 );
 CREATE INDEX idx_rm_demand_acl_dept_key ON rm_demand_acl_dept(dept_key);
 CREATE TABLE IF NOT EXISTS rm_demand_admin (user_id BIGINT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS rm_demand_permission (
+ user_id BIGINT NOT NULL, capability VARCHAR(32) NOT NULL, granted_by BIGINT NULL,
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ PRIMARY KEY(user_id,capability)
+);
 CREATE TABLE IF NOT EXISTS rm_demand (
  id VARCHAR(36) PRIMARY KEY, data_id VARCHAR(32) NOT NULL UNIQUE, form_key VARCHAR(64) NOT NULL,
  request_no VARCHAR(64) NOT NULL UNIQUE, title VARCHAR(200) NOT NULL, submitter_id BIGINT NULL, submitter_name VARCHAR(100) NOT NULL,

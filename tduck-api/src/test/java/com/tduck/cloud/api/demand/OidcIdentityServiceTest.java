@@ -94,7 +94,10 @@ class OidcIdentityServiceTest {
     DemandProperties flags = new DemandProperties();
     flags.setEnabled(true);
     DemandStore store = new DemandStore(jdbc, new ObjectMapper());
-    service = new OidcIdentityService(p, new DemandAccess(store, flags, users), store, users);
+    DemandPermissions permissions = new DemandPermissions(store, flags);
+    service =
+        new OidcIdentityService(
+            p, new DemandAccess(store, flags, users, permissions), store, users);
   }
 
   @AfterEach

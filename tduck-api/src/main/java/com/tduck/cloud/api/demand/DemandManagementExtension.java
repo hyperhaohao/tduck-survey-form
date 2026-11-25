@@ -12,6 +12,8 @@ public class DemandManagementExtension implements FormManagementExtension {
 
   @Override
   public boolean canManage(Long userId, String formKey) {
-    return access.enabled() && access.consoleAdmin(userId) && access.manage(formKey, userId);
+    return access.enabled()
+        && access.capability(userId, DemandPermissions.FORM_MANAGE)
+        && access.manage(formKey, userId);
   }
 }
