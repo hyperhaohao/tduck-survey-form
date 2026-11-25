@@ -1051,6 +1051,41 @@ class DemandWorkflowTest {
   }
 
   @Test
+  @SuppressWarnings("unchecked")
+  void departmentSupportsMultipleLeadersAndLegacyFirst() {
+    Map<String, Object> created =
+        departments.create(
+            body(
+                "name",
+                "多主管组",
+                "parentKey",
+                "D1",
+                "leaderIds",
+                Arrays.asList(20L, 30L)),
+            1L);
+    String deptKey = String.valueOf(created.get("deptKey"));
+    assertEquals("20", String.valueOf(created.get("leaderId")));
+    assertEquals(Arrays.asList("20", "30"), created.get("leaderIds"));
+    assertEquals(2L, store.count("SELECT COUNT(*) FROM rm_demand_dept_leader WHERE dept_key=?", deptKey));
+
+    departments.update(
+        deptKey, body("name", "多主管组", "leaderIds", Arrays.asList(30L, 20L)), 1L);
+    Map<String, Object> listed = null;
+    for (Map<String, Object> row : departments.list(1L))
+      if (deptKey.equals(String.valueOf(row.get("deptKey")))) listed = row;
+    assertNotNull(listed);
+    assertEquals(Arrays.asList("30", "20"), listed.get("leaderIds"));
+    assertEquals("30", String.valueOf(listed.get("leaderId")));
+    assertEquals("人员30", ((List<Map<String, Object>>) listed.get("leaders")).get(0).get("name"));
+
+    departments.removeMember(deptKey, 20L, 1L);
+    departments.removeMember(deptKey, 30L, 1L);
+    departments.delete(deptKey, 1L);
+    assertEquals(
+        0L, store.count("SELECT COUNT(*) FROM rm_demand_dept_leader WHERE dept_key=?", deptKey));
+  }
+
+  @Test
   void departmentLeaderStoredAndValidated() {
     jdbc.update("INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(40,'D1')");
     Map<String, Object> created =
