@@ -18,7 +18,7 @@
 - `sys_env_config` 更新：`fileEnvConfig.domain=http://wanghao.yun:93/u`、`systemInfoConfig.webBaseUrl=http://wanghao.yun:93`；`jwtEnvConfig` 已生成 237 独立新密钥；`deepSeekEnvConfig` 随库迁移，AI 仍指向 236 的 New API 网关。
 - 迁移转储含 AI Key 与密码哈希，仅在受限目录临时保存，导入后已删除；未写入普通目录或 Git。
 - `rm_demand_identity` 的 issuer 仍为 `http://192.168.1.237:13004`，`ruima-admin` 到本地 `ac_user.id=1` 的映射继续有效。
-- 2026-11-25 待部署（权限细分与部门主管）：先备份，再依次执行 `doc/ruima-demand-migration-20261125-capability.sql`（新建 `rm_demand_permission` 并迁移存量后台管理员为 `form.manage`）与 `doc/ruima-demand-migration-20261125-dept-leader.sql`（新增 `rm_demand_dept.leader_id`），然后部署后端、前端。部署后 `/demand/admin` 仅全局管理员，存量后台管理员改用 `/demand/manage`「单据管理」页；组织架构与用户管理需在“平台权限授权”另行授予。回滚保留 `rm_demand_admin` 与 `user_id=0` 锁行，新表不删除。
+- 2026-11-25 权限细分与部门主管已部署：迁移顺序为 `doc/ruima-demand-migration-20261125-capability.sql`（新建 `rm_demand_permission` 并迁移存量后台管理员为 `form.manage`）→ `doc/ruima-demand-migration-20261125-dept-leader.sql`（新增 `rm_demand_dept.leader_id`）→ 后端 → 前端。部署后 `/demand/admin` 仅全局管理员，存量后台管理员改用 `/demand/manage`「单据管理」页；组织架构与用户管理需在“平台权限授权”另行授予。回滚保留 `rm_demand_admin` 与 `user_id=0` 锁行，新表不删除。
 
 ## 三、Casdoor
 
@@ -60,6 +60,7 @@
 
 - 2026-11-24 全局管理员授权（马少卿）：`ruima.demand.admin-ids` 新增本地用户 `910051`（马少卿）；配置备份 `backups/application-test.yml.20261124-025929-pre-ma-shaoqing-global-admin`（`c65adbcf…`），新配置 `d3f95d6c…`；app 重启后 `healthy`，`/`、`/demand/home`、`/demand/admin`、`/project/my`、`/login/entry` 均 200。授权已配置，本人登录核验结果未记录。
 - 2026-11-25 全局管理员授权（RMAdmin）：`ruima.demand.admin-ids` 增加本地用户 `910005`（Casdoor `RMAdmin` 身份映射的“Outline Admin”），名单为 `[910051, 910005]`；配置备份 `backups/application-test.yml.20261125-035041-pre-rmadmin-global-admin`（`d3f95d6c…`），新配置 `cf96d5cf…`；app 重启后 `healthy`，5 个页面均 200；RMAdmin 登录核验全局管理员入口通过。
+- 2026-11-25 权限细分与部门主管（前后端一起部署）：`rm_demand_permission` 新建并迁移 4 个存量后台管理员为 `form.manage`（missing=0）；`rm_demand_dept.leader_id` 新增，12 个部门主管为空。后端 96 项隔离测试、前端全量 77 项页面回归通过。JAR SHA256 `3595ad8f0b7968d29542d0ad054be86c65a6dd4253c11b12e4cf94f01ab92b8a`，应用镜像 `sha256:8687626d6ef5940ef67896be118dce7fc5fef1ddc1126374b10b6fee7ef31740`，旧镜像 `ced50294…` 保留为 `ruima/survey:20261125-pre-permission`；静态 152 个文件，`index.html` SHA256 `c9d70326384b843ab069b5c5d3b909bb60d60cbb1f35dd24e6965ac4941389d5`，web SHA256 `e32f26ebeac1d7b2f932ed55c9c0c52fd2cd9e470213cd41713492349d324da0`；备份 `/data/apps/ruima-survey/backups/permission-20261125-pre`（旧 JAR、镜像 ID、旧静态、12 张相关表；备份前 4 需求、7 收集配置、4 后台管理员、12 部门、117 用户部门关系、15 成员 ACL、1 部门 ACL），报告 `reports/permission-deployment-20261125.json`。app `healthy`，`/`、`/demand/home`、`/demand/forms`、`/demand/mine`、`/demand/pending`、`/demand/publications`、`/demand/manage`、`/demand/admin`、`/project/my`、`/manage/user`、`/login/entry` 均 200；维护账号 `capabilities` 的 global/permissionApi/documentAccess/formManage/org/userManage 均为 true，权限定义 3 项、授权用户 4 个，`/mange/user/page` 200，`scope=managed` 200。组织架构/用户管理当前 0 个授权，需全局管理员在“平台权限授权”补授；240 未更新。代码提交后端 `b0a01f5`、前端 `db07938`。
 
 ## 五、外网映射与验证（2026-11-16 已完成）
 
@@ -98,4 +99,4 @@ sudo nginx -t && sudo nginx -s reload
   ```
 - 手工执行同一条命令已验证：`created=0, skipped=104`，104 个身份映射保持不变。
 - 未登录员工首次 Casdoor 登录仍会自动创建；新员工如需提前出现在成员列表，等待每日同步或在需要时手动执行脚本。
-- 同步只创建普通本地账户，不授予后台管理员、单据管理员或任何收集单权限；权限仍由「后台管理员授权」和「成员权限」单独配置。
+- 同步只创建普通本地账户，不授予平台能力、单据管理员或任何收集单权限；权限仍由「平台权限授权」和「成员权限」单独配置。
