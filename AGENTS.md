@@ -28,7 +28,7 @@
 - 收集单可作废/恢复：作废后停止新填报并从员工入口隐藏，已有需求与处理记录保留；删除原表单仍按原回收站规则，不自动清理需求数据。单据管理员或全局管理员可删除单条需求：删除需求、消息、已读和公示，原答卷保留在原表单数据中。
 - 收集单可设为“只收集”：不进入正式回复、采纳与公示；需求未读时计入待我处理，打开详情标记已读后移出待办，角标同步减少。详情隐藏全部处理区，仍可查看提交内容；`read` 与删除保留，回复/采纳/分派/追问/发布接口拒绝。
 - 收集单可配置「必填人」与「本轮截止期限」：轮次模式 `NONE/SINGLE/PERIODIC`，周期支持每月/每季并在到期时自动开下一轮；必填来源为 `USER`、`DEPT`（含下级）和可选的收集单 `can_fill` 成员，指定人员收集单保存时自动补 `can_fill`。匿名提交允许但不计入必填完成；提醒按单据选择 `DEFAULT`（截止前 1 天与当天）或 `STRONG`（每日），本期站内。
-- 站内消息中心：`rm_demand_notice` 记录 `PUBLICATION/NEW_DEMAND/REPLY/RESULT/ASSIGN/FOLLOWUP/REQUIRED/APPROVAL/APPROVAL_RESULT` 事件；发布公示按可见范围扇出并排除操作人，回复/结果通知填报者，分派通知经办人，追问通知经办人与管理员；`/notices` 提供列表、单条已读与全部已读，`capabilities` 增加 `noticeUnread`。打开需求/公示详情时同步清除对应消息未读；外部钉钉渠道后续在 `DemandNotices` 内扩展。
+- 站内消息中心：`rm_demand_notice` 记录 `PUBLICATION/NEW_DEMAND/REPLY/RESULT/ASSIGN/FOLLOWUP/REQUIRED/APPROVAL/APPROVAL_RESULT` 事件；发布公示按可见范围扇出并排除操作人，回复/结果通知填报者，分派通知经办人，追问通知经办人与管理员；`/notices` 提供列表、单条已读与全部已读，`capabilities` 增加 `noticeUnread`。打开需求/公示详情时同步清除对应消息未读；钉钉推送方案见 `doc/瑞玛钉钉推送方案.md`（规划，未实施）。
 - 审批方式：`rm_demand_form.approval_mode`（`NONE/DIRECT/HIERARCHY`，默认 `NONE`）；提交时 `DemandApproval` 固化审批链和每级候选人，同级或签，逐级从填报人部门到所有上级并跳过无主管部门；聚合 `PENDING` 保持到最后一层通过，中间级不进入普通待办；任一级驳回终止并通知填报人；整链无主管直接进入处理。审批中/驳回时分派/采纳/回复/追问/公示接口返回 409；开启审批时自动关闭匿名。`requires_leader_approval` 与 `leader_id` 保留兼容双写。
 - 收集单首页可见范围跟随填报与成员权限：`LOGIN` 对所有登录用户可见可填；`SELECTED` 对 `can_fill`、`can_handle`、`can_manage` 任一成员可见，但只有 `can_fill` 能填报；非填报成员卡片显示“查看需求”，进入待我处理或获授权总表。
 - 需求导出：保留清单列；单收集单按题目追加 `填报-<label>` 列、`填报人部门` 和 `其他填报内容`；跨收集单追加 `填报内容` 文本；答案只从当前 scope 行批量读取原答卷，选择类显示 `xxxlabel`，附件带名称和 URL，旧题键进入其他填报内容；公示导出保持审核快照。
@@ -108,6 +108,7 @@ mvn -B -pl tduck-api -am package
 - 2026-11-25 必填人与消息中心：新增 `DemandRounds`、`DemandRequired`、`DemandNotices`、`DemandReminderJob`，收集配置增加轮次/提醒/必填开关，新增 `/notices` 列表与已读、`/admin/forms/{key}/required-members`、`/admin/forms/{key}/round/next`；`@EnableScheduling` 与 `ruima.demand.reminder-cron/zone/reminder-enabled` 配置。后端 108 项隔离测试通过（DemandWorkflowTest 81、Oidc 4、AI 23）；迁移 `doc/ruima-demand-migration-20261125-required-round-notice.sql` 尚未执行；尚未部署、尚未推送。
 - 2026-11-25 部门主管审批：新增 `DemandApproval`、`rm_demand_form.requires_leader_approval`、`rm_demand` 审批字段、`scope=approval`、`POST /requests/{id}/approval`、处理门禁与 `APPROVAL/APPROVAL_RESULT` 消息。后端 115 项隔离测试通过（DemandWorkflowTest 88、Oidc 4、AI 23）；迁移 `doc/ruima-demand-migration-20261125-leader-approval.sql` 已执行；已部署 237，真实浏览器验收通过（合成主管通过/驳回、消息与时间线、清理一致）；代码本地提交 `6c14993`，GitHub 网络不可用未推送。
 - 2026-11-25 多主管与逐级审批：新增 `rm_demand_dept_leader`、`approval_mode`、步骤/候选人表与通知级别；支持 NONE/DIRECT/HIERARCHY、或签、逐级跳过、自审批排除、多部门起点、提交固化和聚合 PENDING；用户管理多选主管，收集配置三模式，待我审批当前级，详情审批记录。后端 123 项隔离测试通过（DemandWorkflowTest 96、Oidc 4、AI 23）；前端生产构建通过、92 项页面回归通过；237 部署与三级合成验收通过，技术中心成员细分为直属 4/机械 14/电气 8/软件 3。
+- 2026-11-26 消息中心导航与钉钉推送规划：消息中心移到首页下方顶级菜单；前端 93 项页面回归通过，已部署 237 静态（156 个文件，`index.html` `d03cde0f…`，备份 `backups/static-message-center-nav-20261126-pre`），后端未改。钉钉推送方案见 `doc/瑞玛钉钉推送方案.md`；只完成方案与只读核对（邮箱 101/104、手机号 0、237 出口 200），尚未开始钉钉代码或真实发送。
 - 尚未完成整栈异机恢复、异机备份、多人并发压测及业务试点完整验收；不能据此宣称已正式投产。
 
 ## 240部署边界
