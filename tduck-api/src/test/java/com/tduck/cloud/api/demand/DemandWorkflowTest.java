@@ -101,8 +101,17 @@ class DemandWorkflowTest {
     permissions = new DemandPermissions(store, properties);
     rounds = new DemandRounds(store, properties);
     access = new DemandAccess(store, properties, users, permissions, rounds);
-    notices = new DemandNotices(store, access, properties);
-    approval = new DemandApproval(store, access, notices);
+    DemandDingTalkProperties dingTalkProperties = new DemandDingTalkProperties();
+    dingTalkProperties.setEnabled(false);
+    DemandPushSettings pushSettings = new DemandPushSettings(store, properties, dingTalkProperties);
+    DemandDingTalkClient dingTalkClient =
+        new DemandDingTalkClient(dingTalkProperties, new com.fasterxml.jackson.databind.ObjectMapper());
+    DemandDingTalkDirectory dingTalkDirectory =
+        new DemandDingTalkDirectory(store, dingTalkClient, dingTalkProperties);
+    DemandPush push =
+        new DemandPush(store, pushSettings, dingTalkClient, dingTalkDirectory, dingTalkProperties);
+    notices = new DemandNotices(store, access, properties, event -> {}, push);
+    approval = new DemandApproval(store, access, notices, push);
     required = new DemandRequired(store, access, rounds);
     formFields = new DemandFormFields(store);
     forms = new DemandForms(store, access, permissions, rounds, required, notices);
@@ -112,7 +121,7 @@ class DemandWorkflowTest {
     this.fields = fields;
     workflow = new DemandWorkflow(store, access, fields, formFields, notices, approval);
     export = new DemandExport(workflow, formFields);
-    submission = new DemandSubmission(store, access, formFields, notices, approval);
+    submission = new DemandSubmission(store, access, formFields, notices, approval, push);
     reminders = new DemandReminderJob(properties, store, rounds, required, notices);
     tx = new TransactionTemplate(new DataSourceTransactionManager(ds));
   }

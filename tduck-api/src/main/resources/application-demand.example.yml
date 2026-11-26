@@ -5,6 +5,22 @@ ruima:
     zone: Asia/Shanghai
     reminder-enabled: true
     reminder-cron: 0 5 9 * * *
+    dingtalk:
+      enabled: false
+      app-key: ${DINGTALK_APP_KEY:}
+      app-secret: ${DINGTALK_APP_SECRET:}
+      agent-id: ${DINGTALK_AGENT_ID:0}
+      creator-user-id: ${DINGTALK_CREATOR_USER_ID:0}
+      creator-union-id: ${DINGTALK_CREATOR_UNION_ID:}
+      api-base: https://oapi.dingtalk.com
+      api-v1-base: https://api.dingtalk.com
+      link-base: ${DINGTALK_LINK_BASE:}
+      dispatch-delay-ms: 30000
+      dispatch-batch-size: 50
+      max-attempts: 5
+      lease-seconds: 120
+      monthly-call-limit: 9000
+      todo-enabled: true
   oidc:
     enabled: true
     issuer: ${OIDC_ISSUER:http://192.168.1.237:13004}

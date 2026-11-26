@@ -2,7 +2,7 @@
 
 **瑞玛需求征集已在 http://192.168.1.240:18000 部署，沿用原填鸭界面风格，默认登录填写、可选匿名。** 本目录保留无凭据部署模板；实际配置由服务器受限运行目录维护，不复制到仓库。
 
-**2026-11-25 权限细分与部门主管已在 237 部署，尚未部署到 240。** 如需更新 240，先备份，再依次执行 `doc/ruima-demand-migration-20261125-capability.sql` 与 `doc/ruima-demand-migration-20261125-dept-leader.sql`，然后部署后端、前端；240 仍作为回退环境，不承接 11-17 之后的日常更新。
+**2026-11-26 240 已升级到当前版本（多主管、逐级审批、消息中心导航、钉钉推送代码）。240 现在是 237 的前置测试环境：先在 240 验证，通过后再迁移 237。** 钉钉应用凭证尚未配置，240 上 `ruima.demand.dingtalk.enabled` 默认关闭，不会向真实员工发送消息；验证真实待办/工作通知前需在 240 受限 secrets 增加钉钉配置并重启 app。
 
 ## 一、运行配置
 
@@ -145,3 +145,13 @@ sudo nginx -t
 - 说明：全局回收站同时列出历史上已删除的原表单（截图中的两条“未命名问卷”），非本次验收创建，未清理。
 - 回退材料：`backups/delete-20261116-pre/`；旧镜像 `ruima/survey-test:rollback-20261116-delete`；新增列保留，不回滚删除。
 - 部署来源为本地未提交工作区（后端 HEAD `5176015352771032ccdccafe73d4e3bc4052a78b`、前端 HEAD `5c3cb9dd478540e565d08a9dda7cf5d89a3495fd`）；尚未推送 GitHub。
+
+## 十四、2026-11-26 当前版本与钉钉推送（待配置）
+
+- 240 从旧版本升级到当前构建：JAR SHA256 `02905be22910b2a2e96c326027dee86433d3e603273bf35501cd12d525eace47`，应用镜像 `sha256:c68275e3c1d8f919efcbb9cf1659268cd1844db7a6f4f3d40bff4063ef6f2019`（此前钉钉构建 `ac3bc416…`/`81d238ac…`、`2be711ca…`/`7953417a…`），旧镜像 `ec612908…` 保留为 `ruima/survey-test:20261126-pre-dingtalk`，`81d238ac…` 保留为 `ruima/survey-test:20261126-pre-readskip`；读后跳过修正备份 `backups/read-skip-20261126`、报告 `reports/read-skip-deployment-20261126.json`；最终后端备份 `backups/final-dingtalk-20261126`、报告 `reports/dingtalk-final-backend-20261126.json`；静态 156 个文件，`index.html` `ba184e97ac4d77c4d11dce46b969fdf03cbe1d500a235a6512ad1d4e713c379e`，旧 `index.html` `7190d6b8…`。备份 `backups/dingtalk-20261126-pre`（全库转储、旧 JAR、旧镜像 ID、旧静态），报告 `reports/dingtalk-deployment-20261126.json`。
+- 迁移：240 缺失的部门 ACL、部门快照/排序、追问、公示归档、只收集、平台权限、部门主管、必填/消息、单级审批、多主管、钉钉 outbox 已按顺序执行；已有作废/删除/成员管理迁移跳过。升级前计数 2 条需求、2 条已配置收集单、5 个本地用户、6 个原表单。
+- 验证：12 个页面（含 `/demand/approvals`、`/demand/messages`、`/demand/admin`）均 200；维护账号 `capabilities` 为全局管理员，后台 4 个收集配置返回 `approvalMode`；`/admin/departments`、`/notices`、`scope=approval` 和 `/admin/dingtalk/status` 均 200。真实浏览器 1024/390 打开后台「钉钉推送」页签，状态、映射、设置区正常且无横向溢出；当前显示“部署总开关未开启或应用凭证缺失”，符合预期。
+- 测试：后端 129 项隔离测试通过（DemandWorkflowTest 96、DemandPushTest 6、Oidc 4、AI 23）；前端生产构建通过，94 项页面回归通过。
+- 钉钉真实发送未验证：240 的 `secrets/application-test.yml` 尚无 `ruima.demand.dingtalk` 配置，`admin/dingtalk/status` 返回 `configured=false`，没有外呼。需要在 240 secrets 中增加 `ruima.demand.dingtalk`（app-key/app-secret/agent-id/creator-union-id、`link-base: http://192.168.1.240:18000`、`todo-enabled: true`），重启 app 后同步通讯录、确认管理员映射，再只向管理员本人发送测试；不向全体员工发送。若 240 链接只在内网可用，验收时需确认钉钉手机端可达，或使用 237 的公网链接做最终验收。
+- 237 尚未迁移钉钉推送：240 真实钉钉测试通过后再按 237 迁移/部署流程执行。
+- 回退：恢复旧静态、旧 JAR/镜像并重启 app；新增表和列保留，不做破坏性删除。

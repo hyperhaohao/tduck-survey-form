@@ -19,6 +19,7 @@ public class DemandSubmission {
   private final DemandFormFields formFields;
   private final DemandNotices notices;
   private final DemandApproval approval;
+  private final DemandPush push;
   /** 提交前验证权限并清除客户端伪造的身份和记录标识。 */
   public void before(UserFormDataEntity entity, Long userId, boolean backend) {
     if (access.form(entity.getFormKey()) == null) return;
@@ -81,6 +82,12 @@ public class DemandSubmission {
     notice.put("anonymous", anonymous);
     boolean approvalPending = !anonymous && approval.start(notice) != null;
     if (!approvalPending) notices.newDemand(notice);
+    if (!anonymous && userId != null && push != null) {
+      Map<String, Object> submittedForm = access.form(entity.getFormKey());
+      Object round = submittedForm == null ? null : submittedForm.get("roundNo");
+      int roundNo = round instanceof Number ? ((Number) round).intValue() : 0;
+      push.completeRequired(userId, entity.getFormKey(), roundNo);
+    }
     Map<String, Object> receipt = new LinkedHashMap<>();
     receipt.put("id", demandId);
     receipt.put("requestNo", requestNo);

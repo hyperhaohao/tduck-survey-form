@@ -24,6 +24,7 @@ public class DemandApproval {
   private final DemandStore store;
   private final DemandAccess access;
   private final DemandNotices notices;
+  private final DemandPush push;
 
   /** 提交后按收集单审批模式启动审批；返回首个审批人或 1，未启动返回 null。 */
   @Transactional
@@ -193,6 +194,7 @@ public class DemandApproval {
           "第" + currentStep + "级驳回（" + str(step.get("deptName")) + "）：" + comment);
       notices.approvalResult(demand, false, comment);
     } else throw new BaseException("审批动作无效");
+    if (push != null) push.completeApprovalStep(demandId, (int) currentStep);
   }
 
   /** 处理动作前置门禁：待审批或已驳回时不允许处理。 */

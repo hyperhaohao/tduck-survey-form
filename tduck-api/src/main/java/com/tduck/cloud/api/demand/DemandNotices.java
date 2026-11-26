@@ -9,7 +9,9 @@ import java.time.ZoneId;
 import java.util.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 /** 站内消息：事件扇出、列表、已读与清理；外部渠道后续在此扩展。 */
 @Slf4j
@@ -29,6 +31,8 @@ public class DemandNotices {
   private final DemandStore store;
   private final DemandAccess access;
   private final DemandProperties properties;
+  private final ApplicationEventPublisher publisher;
+  private final DemandPush push;
 
   /** 未读消息数，供侧栏与铃铛角标使用。 */
   public long unread(Long userId) {
@@ -109,6 +113,7 @@ public class DemandNotices {
   }
 
   /** 发布公示：按收集单可见范围扇出，排除操作人；重新发布时复用同一条消息。 */
+  @Transactional
   public void publication(Map<String, Object> publication, Long operator) {
     try {
       Object formKeyValue = publication.get("formKey");
@@ -123,20 +128,41 @@ public class DemandNotices {
       String demandId = str(publication.get("demandId"));
       String publicationId = str(publication.get("id"));
       List<Object[]> inserts = new ArrayList<>();
+      List<DemandNoticeCreatedEvent> events = new ArrayList<>();
       for (Long userId : recipients) {
-        if (store.update(
-                "UPDATE rm_demand_notice SET title=?,content=?,demand_id=?,read_at=NULL,create_time=CURRENT_TIMESTAMP"
-                    + " WHERE user_id=? AND kind=? AND publication_id=?",
-                title,
-                content,
-                emptyToNull(demandId),
+        Map<String, Object> existing =
+            store.one(
+                "SELECT id FROM rm_demand_notice WHERE user_id=? AND kind=? AND publication_id=?",
                 userId,
                 PUBLICATION,
-                publicationId)
-            > 0) continue;
+                publicationId);
+        if (existing != null) {
+          String noticeId = str(existing.get("id"));
+          store.update(
+              "UPDATE rm_demand_notice SET title=?,content=?,demand_id=?,read_at=NULL,create_time=CURRENT_TIMESTAMP WHERE id=?",
+              title,
+              content,
+              emptyToNull(demandId),
+              noticeId);
+          events.add(
+              new DemandNoticeCreatedEvent(
+                  noticeId,
+                  userId,
+                  PUBLICATION,
+                  formKey,
+                  emptyToNull(demandId),
+                  publicationId,
+                  null,
+                  null,
+                  title,
+                  content,
+                  null));
+          continue;
+        }
+        String noticeId = id();
         inserts.add(
             new Object[] {
-              id(),
+              noticeId,
               userId,
               PUBLICATION,
               formKey,
@@ -146,17 +172,32 @@ public class DemandNotices {
               title,
               content
             });
+        events.add(
+            new DemandNoticeCreatedEvent(
+                noticeId,
+                userId,
+                PUBLICATION,
+                formKey,
+                emptyToNull(demandId),
+                publicationId,
+                null,
+                null,
+                title,
+                content,
+                null));
       }
       store.batch(
           "INSERT INTO rm_demand_notice(id,user_id,kind,form_key,demand_id,publication_id,round_no,title,content)"
               + " VALUES(?,?,?,?,?,?,?,?,?)",
           inserts);
+      if (publisher != null) for (DemandNoticeCreatedEvent event : events) publisher.publishEvent(event);
     } catch (Exception error) {
       log.warn("发布公示消息失败：{}", publication.get("id"), error);
     }
   }
 
   /** 新需求提交：通知该收集单的单据管理员，排除提交人本人。 */
+  @Transactional
   public void newDemand(Map<String, Object> demand) {
     try {
       String formKey = str(demand.get("formKey"));
@@ -188,16 +229,19 @@ public class DemandNotices {
   }
 
   /** 正式回复：通知非匿名填报者本人。 */
+  @Transactional
   public void reply(Map<String, Object> demand, String content) {
     notifySubmitter(demand, REPLY, "您的需求有新回复", content);
   }
 
   /** 采纳结果/进度更新：通知非匿名填报者本人。 */
+  @Transactional
   public void result(Map<String, Object> demand, String text) {
     notifySubmitter(demand, RESULT, "处理结果更新", text + " · " + str(demand.get("title")));
   }
 
   /** 分派：通知新经办人。 */
+  @Transactional
   public void assign(Map<String, Object> demand, Long handlerId, Long operator) {
     try {
       if (handlerId == null || handlerId.equals(operator)) return;
@@ -218,6 +262,7 @@ public class DemandNotices {
   }
 
   /** 填报者追问：通知经办人与全部单据管理员，排除追问人。 */
+  @Transactional
   public void followUp(Map<String, Object> demand, String content) {
     try {
       String formKey = str(demand.get("formKey"));
@@ -238,6 +283,7 @@ public class DemandNotices {
   }
 
   /** 提交待部门主管审批：通知当前级全部候选人，按级去重。 */
+  @Transactional
   public void approvalTask(
       Map<String, Object> demand, int stepNo, String deptName, List<Map<String, Object>> approvers) {
     try {
@@ -279,6 +325,7 @@ public class DemandNotices {
   }
 
   /** 旧单级兼容：无步骤号。 */
+  @Transactional
   public void approvalTask(Map<String, Object> demand, Long leaderId) {
     try {
       if (leaderId == null) return;
@@ -314,6 +361,7 @@ public class DemandNotices {
   }
 
   /** 审批结果：通知填报人。 */
+  @Transactional
   public void approvalResult(Map<String, Object> demand, boolean approved, String comment) {
     try {
       Long submitter = number(demand.get("submitterId"));
@@ -333,6 +381,7 @@ public class DemandNotices {
   }
 
   /** 待填报提醒：同一用户、同一收集单、同一轮、同一天只保留一条。 */
+  @Transactional
   public void requiredReminder(
       Map<String, Object> form, Long userId, String formName, Timestamp endTime) {
     try {
@@ -361,6 +410,7 @@ public class DemandNotices {
           null,
           null,
           roundNo,
+          endTime,
           "待填报提醒",
           clip(
               "「"
@@ -375,8 +425,10 @@ public class DemandNotices {
   }
 
   public void deleteForDemand(String demandId) {
-    if (demandId != null)
+    if (demandId != null) {
+      if (push != null) push.cancelDemand(demandId);
       store.update("DELETE FROM rm_demand_notice WHERE demand_id=?", demandId);
+    }
   }
 
   public void deleteForPublication(String publicationId) {
@@ -385,7 +437,10 @@ public class DemandNotices {
   }
 
   public void deleteForForm(String formKey) {
-    if (formKey != null) store.update("DELETE FROM rm_demand_notice WHERE form_key=?", formKey);
+    if (formKey != null) {
+      if (push != null) push.cancelForm(formKey);
+      store.update("DELETE FROM rm_demand_notice WHERE form_key=?", formKey);
+    }
   }
 
   private void notifySubmitter(
@@ -418,19 +473,48 @@ public class DemandNotices {
       Integer roundNo,
       String title,
       String content) {
+    insert(userId, kind, formKey, demandId, publicationId, roundNo, null, title, content);
+  }
+
+  private void insert(
+      Long userId,
+      String kind,
+      String formKey,
+      String demandId,
+      String publicationId,
+      Integer roundNo,
+      Timestamp dueAt,
+      String title,
+      String content) {
     if (userId == null) return;
-    store.update(
-        "INSERT INTO rm_demand_notice(id,user_id,kind,form_key,demand_id,publication_id,round_no,title,content)"
-            + " VALUES(?,?,?,?,?,?,?,?,?)",
-        id(),
-        userId,
-        kind,
-        emptyToNull(formKey),
-        emptyToNull(demandId),
-        emptyToNull(publicationId),
-        roundNo,
-        clip(title, 200),
-        clip(content, 1000));
+    String noticeId = id();
+    int rows =
+        store.update(
+            "INSERT INTO rm_demand_notice(id,user_id,kind,form_key,demand_id,publication_id,round_no,title,content)"
+                + " VALUES(?,?,?,?,?,?,?,?,?)",
+            noticeId,
+            userId,
+            kind,
+            emptyToNull(formKey),
+            emptyToNull(demandId),
+            emptyToNull(publicationId),
+            roundNo,
+            clip(title, 200),
+            clip(content, 1000));
+    if (rows > 0 && publisher != null)
+      publisher.publishEvent(
+          new DemandNoticeCreatedEvent(
+              noticeId,
+              userId,
+              kind,
+              emptyToNull(formKey),
+              emptyToNull(demandId),
+              emptyToNull(publicationId),
+              roundNo,
+              null,
+              clip(title, 200),
+              clip(content, 1000),
+              dueAt));
   }
 
   private void insertWithStep(
@@ -444,19 +528,35 @@ public class DemandNotices {
       String title,
       String content) {
     if (userId == null) return;
-    store.update(
-        "INSERT INTO rm_demand_notice(id,user_id,kind,form_key,demand_id,publication_id,round_no,step_no,title,content)"
-            + " VALUES(?,?,?,?,?,?,?,?,?,?)",
-        id(),
-        userId,
-        kind,
-        emptyToNull(formKey),
-        emptyToNull(demandId),
-        emptyToNull(publicationId),
-        roundNo,
-        stepNo,
-        clip(title, 200),
-        clip(content, 1000));
+    String noticeId = id();
+    int rows =
+        store.update(
+            "INSERT INTO rm_demand_notice(id,user_id,kind,form_key,demand_id,publication_id,round_no,step_no,title,content)"
+                + " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            noticeId,
+            userId,
+            kind,
+            emptyToNull(formKey),
+            emptyToNull(demandId),
+            emptyToNull(publicationId),
+            roundNo,
+            stepNo,
+            clip(title, 200),
+            clip(content, 1000));
+    if (rows > 0 && publisher != null)
+      publisher.publishEvent(
+          new DemandNoticeCreatedEvent(
+              noticeId,
+              userId,
+              kind,
+              emptyToNull(formKey),
+              emptyToNull(demandId),
+              emptyToNull(publicationId),
+              roundNo,
+              stepNo,
+              clip(title, 200),
+              clip(content, 1000),
+              null));
   }
 
   /** 可见该收集单公示的用户：LOGIN 全员，SELECTED 取填报/经办/管理授权并集。 */
