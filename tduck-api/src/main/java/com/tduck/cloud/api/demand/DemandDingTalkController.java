@@ -19,9 +19,41 @@ public class DemandDingTalkController {
   private final DemandPush push;
   private final DemandDingTalkDirectory directory;
   private final DemandDingTalkClient client;
+  private final DemandDingTalkConfig config;
 
   private Long user(HttpServletRequest request) {
     return number(request.getAttribute("userId"));
+  }
+
+  @GetMapping("/config")
+  public Result<?> config(HttpServletRequest request) {
+    access.requireGlobalAdmin(user(request));
+    return Result.success(config.view());
+  }
+
+  @PutMapping("/config")
+  public Result<?> saveConfig(
+      @RequestBody Map<String, Object> body, HttpServletRequest request) {
+    Long operator = user(request);
+    access.requireGlobalAdmin(operator);
+    return Result.success(config.save(body, operator));
+  }
+
+  @PostMapping("/users/{dingtalkUserId}/creator")
+  public Result<?> creator(@PathVariable String dingtalkUserId, HttpServletRequest request) {
+    Long operator = user(request);
+    access.requireGlobalAdmin(operator);
+    Map<String, Object> mapping = directory.mapping(dingtalkUserId);
+    if (mapping == null
+        || !DemandDingTalkDirectory.CONFIRMED.equals(str(mapping.get("status")))
+        || !flag(mapping.get("active")))
+      throw new BaseException("只能将已确认且在职的钉钉账户设为待办创建人", 409);
+    Long userId = number(mapping.get("userId"));
+    String unionId = str(mapping.get("unionId"));
+    if (userId == null || unionId.isEmpty())
+      throw new BaseException("该钉钉账户缺少 unionId，无法创建待办", 409);
+    config.setCreator(userId, unionId);
+    return Result.success(config.view());
   }
 
   @GetMapping("/status")
@@ -139,5 +171,9 @@ public class DemandDingTalkController {
     access.requireGlobalAdmin(user(request));
     push.cleanup();
     return Result.success(true);
+  }
+
+  private static String str(Object value) {
+    return value == null ? "" : value.toString();
   }
 }

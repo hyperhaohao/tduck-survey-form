@@ -1,0 +1,67 @@
+-- 瑞玛需求模块 2026-11-27 增量迁移：必填人员 ACL 回填（可重复执行）。
+-- 用于 required-acl 之后补：列已存在但回填未完成的场景；显式 COLLATE 避免服务器默认排序规则冲突。
+-- 部署顺序仍为迁移、后端、前端；执行前建议完成数据库备份。
+
+-- 1) 旧用户必填标记回填到 ACL，并同步可填报；数值比较兼容前导零。
+UPDATE rm_demand_acl a
+JOIN rm_demand_form c ON c.form_key = a.form_key
+JOIN rm_demand_required r
+  ON r.form_key = a.form_key
+ AND r.subject_type = 'USER'
+ AND r.subject_id REGEXP '^[0-9]+$'
+ AND CAST(r.subject_id AS UNSIGNED) = a.user_id
+SET a.required = TRUE,
+    a.can_fill = TRUE;
+
+-- 2) 仅必填、尚无 ACL 的用户补授权行。
+INSERT INTO rm_demand_acl(form_key,user_id,can_fill,can_handle,can_manage,required)
+SELECT r.form_key, CAST(r.subject_id AS UNSIGNED),
+       TRUE,
+       FALSE, FALSE, TRUE
+FROM rm_demand_required r
+JOIN rm_demand_form c ON c.form_key = r.form_key
+JOIN ac_user u ON u.id = CAST(r.subject_id AS UNSIGNED) AND u.deleted = FALSE
+WHERE r.subject_type = 'USER'
+  AND r.subject_id REGEXP '^[0-9]+$'
+  AND NOT EXISTS (
+    SELECT 1 FROM rm_demand_acl a
+    WHERE a.form_key = r.form_key AND a.user_id = CAST(r.subject_id AS UNSIGNED)
+  );
+
+-- 3) 旧部门必填标记回填到 ACL，并同步可填报。
+UPDATE rm_demand_acl_dept ad
+JOIN rm_demand_form c ON c.form_key = ad.form_key
+JOIN rm_demand_required r
+  ON r.form_key = ad.form_key
+ AND r.subject_type = 'DEPT'
+ AND r.subject_id COLLATE utf8mb4_unicode_ci = ad.dept_key COLLATE utf8mb4_unicode_ci
+SET ad.required = TRUE,
+    ad.can_fill = TRUE;
+
+-- 4) 仅必填、尚无 ACL 的部门补授权行。
+INSERT INTO rm_demand_acl_dept(form_key,dept_key,can_fill,can_handle,can_manage,created_by,required)
+SELECT r.form_key, r.subject_id,
+       TRUE,
+       FALSE, FALSE, r.created_by, TRUE
+FROM rm_demand_required r
+JOIN rm_demand_form c ON c.form_key = r.form_key
+JOIN rm_demand_dept d ON d.dept_key COLLATE utf8mb4_unicode_ci = r.subject_id COLLATE utf8mb4_unicode_ci
+                     AND d.active = TRUE
+WHERE r.subject_type = 'DEPT'
+  AND NOT EXISTS (
+    SELECT 1 FROM rm_demand_acl_dept ad
+    WHERE ad.form_key = r.form_key AND ad.dept_key COLLATE utf8mb4_unicode_ci = r.subject_id COLLATE utf8mb4_unicode_ci
+  );
+
+-- 5) 所有必填成员必须可填报（历史保存可能遗漏）。
+UPDATE rm_demand_acl SET can_fill = TRUE
+WHERE required = TRUE AND can_fill = FALSE;
+
+UPDATE rm_demand_acl_dept SET can_fill = TRUE
+WHERE required = TRUE AND can_fill = FALSE;
+
+-- 执行后核对（停用用户/部门除外，以下应尽量为 0）：
+-- SELECT COUNT(*) FROM rm_demand_acl
+--  WHERE required=TRUE AND can_fill=FALSE;
+-- SELECT COUNT(*) FROM rm_demand_acl_dept
+--  WHERE required=TRUE AND can_fill=FALSE;

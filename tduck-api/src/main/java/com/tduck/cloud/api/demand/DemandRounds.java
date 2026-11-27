@@ -4,15 +4,18 @@ import static com.tduck.cloud.api.demand.DemandStore.*;
 
 import com.tduck.cloud.common.exception.BaseException;
 import java.sql.Timestamp;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.YearMonth;
 import java.time.ZoneId;
+import java.time.temporal.ChronoUnit;
 import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-/** 收集单轮次：单轮与周期轮次的初始化、推进与截止判断。 */
+/** 收集单轮次：不启用轮次（隐式单轮）、周期轮次的初始化、推进与截止判断。 */
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -20,8 +23,13 @@ public class DemandRounds {
   public static final String NONE = "NONE";
   public static final String SINGLE = "SINGLE";
   public static final String PERIODIC = "PERIODIC";
+  public static final String DAILY = "DAILY";
+  public static final String WEEKLY = "WEEKLY";
   public static final String MONTH = "MONTH";
   public static final String QUARTER = "QUARTER";
+  public static final String REMINDER_NONE = "NONE";
+  public static final String REMINDER_DEFAULT = "DEFAULT";
+  public static final String REMINDER_STRONG = "STRONG";
 
   private final DemandStore store;
   private final DemandProperties properties;
@@ -67,7 +75,7 @@ public class DemandRounds {
     long now = System.currentTimeMillis();
     while (end.getTime() <= now && guard++ < 240) {
       Timestamp start = end;
-      end = plusPeriod(start, str(form.get("roundPeriod")));
+      end = plusPeriod(start, str(form.get("roundPeriod")), intValue(form.get("roundDay")));
       nextNo++;
       store.update(
           "UPDATE rm_demand_form SET round_no=?,round_start_time=?,round_end_time=? WHERE form_key=?",
@@ -82,7 +90,7 @@ public class DemandRounds {
     return form;
   }
 
-  /** 手工开启下一轮：单轮与周期均可用，周期未传截止时间时按周期推算。 */
+  /** 手工开启下一轮；不启用轮次/单轮回退整单截止，周期按锚点推算。 */
   @Transactional
   public Map<String, Object> next(String formKey, Timestamp endTime) {
     Map<String, Object> form =
@@ -92,21 +100,47 @@ public class DemandRounds {
     if (NONE.equals(mode)) throw new BaseException("未启用轮次");
     Timestamp start = now();
     Timestamp end = endTime;
-    if (end == null && PERIODIC.equals(mode)) end = plusPeriod(start, str(form.get("roundPeriod")));
-    if (end == null) throw new BaseException("请选择本轮截止期限");
+    if (end == null && PERIODIC.equals(mode))
+      end = plusPeriod(start, str(form.get("roundPeriod")), intValue(form.get("roundDay")));
+    if (end == null && SINGLE.equals(mode)) end = timestamp(form.get("endTime"));
+    if (end == null) throw new BaseException("请选择本轮截止期限或先设置整单截止时间");
     if (end.getTime() <= start.getTime())
       throw new BaseException("本轮截止期限需晚于当前时间");
     long nextNo = number(form.get("roundNo")) + 1;
-    store.update(
-        "UPDATE rm_demand_form SET round_no=?,round_start_time=?,round_end_time=? WHERE form_key=?",
-        nextNo,
-        start,
-        end,
-        formKey);
+    if (SINGLE.equals(mode)) {
+      // 不启用轮次只有一个整单截止：手工下一轮更新整单截止并清空轮次截止，避免写掉无效字段。
+      store.update(
+          "UPDATE rm_demand_form SET round_no=?,round_start_time=?,round_end_time=NULL,end_time=? WHERE form_key=?",
+          nextNo,
+          start,
+          end,
+          formKey);
+      form.put("endTime", end);
+    } else {
+      store.update(
+          "UPDATE rm_demand_form SET round_no=?,round_start_time=?,round_end_time=? WHERE form_key=?",
+          nextNo,
+          start,
+          end,
+          formKey);
+      form.put("roundEndTime", end);
+    }
     form.put("roundNo", nextNo);
     form.put("roundStartTime", start);
-    form.put("roundEndTime", end);
     return form;
+  }
+
+  /** 有效轮次截止：SINGLE/不启用轮次使用整单截止，PERIODIC 使用本轮截止。 */
+  public Timestamp roundDeadline(Map<String, Object> form) {
+    if (form == null) return null;
+    String mode = str(form.get("roundMode"));
+    if (SINGLE.equals(mode)) {
+      Timestamp end = timestamp(form.get("endTime"));
+      // 兼容升级前只写了 round_end_time 的历史单轮数据。
+      return end != null ? end : timestamp(form.get("roundEndTime"));
+    }
+    if (PERIODIC.equals(mode)) return timestamp(form.get("roundEndTime"));
+    return null;
   }
 
   /** 解析前端提交的本地日期时间，按业务时区换算；兼容 ISO 与空格分隔。 */
@@ -125,12 +159,60 @@ public class DemandRounds {
     }
   }
 
-  /** 按自然月或自然季度推进一个周期。 */
+  /** 按周期推进；roundDay 正数从周期开始，负数从周期结束倒数。 */
   public Timestamp plusPeriod(Timestamp start, String period) {
+    return plusPeriod(start, period, null);
+  }
+
+  public Timestamp plusPeriod(Timestamp start, String period, Integer roundDay) {
     ZoneId zone = zone();
     LocalDateTime time = start.toInstant().atZone(zone).toLocalDateTime();
-    LocalDateTime next = QUARTER.equals(period) ? time.plusMonths(3) : time.plusMonths(1);
+    LocalDateTime next;
+    if (DAILY.equals(period)) next = time.plusDays(1);
+    else if (WEEKLY.equals(period)) next = nextWeekday(time, roundDay);
+    else if (QUARTER.equals(period))
+      next = roundDay == null ? time.plusMonths(3) : nextPeriodAnchor(time, true, roundDay);
+    else next = roundDay == null ? time.plusMonths(1) : nextPeriodAnchor(time, false, roundDay);
     return Timestamp.from(next.atZone(zone).toInstant());
+  }
+
+  private LocalDateTime nextWeekday(LocalDateTime time, Integer roundDay) {
+    int target =
+        roundDay == null ? time.getDayOfWeek().getValue() : Math.min(7, Math.max(1, roundDay));
+    int delta = (target - time.getDayOfWeek().getValue() + 7) % 7;
+    if (delta == 0) delta = 7;
+    return time.plusDays(delta);
+  }
+
+  /** 月度/季度锚点：先看当前周期，候选不晚于起点则顺延一个周期。 */
+  private LocalDateTime nextPeriodAnchor(LocalDateTime time, boolean quarter, int roundDay) {
+    LocalDateTime cursor = time;
+    for (int i = 0; i < 2; i++) {
+      YearMonth month = YearMonth.from(cursor);
+      LocalDate start;
+      LocalDate end;
+      if (quarter) {
+        int startMonth = ((month.getMonthValue() - 1) / 3) * 3 + 1;
+        YearMonth quarterStart = YearMonth.of(month.getYear(), startMonth);
+        start = quarterStart.atDay(1);
+        end = quarterStart.plusMonths(3).atDay(1).minusDays(1);
+      } else {
+        start = month.atDay(1);
+        end = month.atEndOfMonth();
+      }
+      LocalDate anchor = anchorDate(start, end, roundDay);
+      LocalDateTime candidate = anchor.atTime(cursor.toLocalTime());
+      if (candidate.isAfter(time)) return candidate;
+      cursor = end.plusDays(1).atTime(cursor.toLocalTime());
+    }
+    return cursor;
+  }
+
+  private LocalDate anchorDate(LocalDate start, LocalDate end, int roundDay) {
+    long span = ChronoUnit.DAYS.between(start, end);
+    if (roundDay > 0) return start.plusDays(Math.min(roundDay - 1L, span));
+    if (roundDay < 0) return end.plusDays(Math.max(roundDay + 1L, -span));
+    return end;
   }
 
   /** 当前轮次起点；无轮次或未开始返回 null。 */
@@ -138,8 +220,23 @@ public class DemandRounds {
     return form == null ? null : timestamp(form.get("roundStartTime"));
   }
 
+  /** 提醒方式白名单；旧的小写/未知值统一回落到截止前提醒。 */
+  public static String normalizeReminder(Object value) {
+    String mode = str(value).trim().toUpperCase(java.util.Locale.ROOT);
+    return REMINDER_NONE.equals(mode) || REMINDER_STRONG.equals(mode) ? mode : REMINDER_DEFAULT;
+  }
+
   static String str(Object value) {
     return value == null ? "" : value.toString();
+  }
+
+  static Integer intValue(Object value) {
+    if (value == null) return null;
+    try {
+      return Integer.valueOf(String.valueOf(value).trim());
+    } catch (NumberFormatException error) {
+      return null;
+    }
   }
 
   static Timestamp timestamp(Object value) {

@@ -28,10 +28,12 @@ public class DemandRequired {
     Map<String, Object> result = new LinkedHashMap<>();
     result.put("roundMode", DemandRounds.str(form.get("roundMode")));
     result.put("roundPeriod", DemandRounds.str(form.get("roundPeriod")));
+    result.put("roundDay", DemandRounds.intValue(form.get("roundDay")));
     result.put("roundNo", number(form.get("roundNo")));
     result.put("roundStartTime", form.get("roundStartTime"));
     result.put("roundEndTime", form.get("roundEndTime"));
-    result.put("reminderMode", DemandRounds.str(form.get("reminderMode")));
+    result.put("roundDeadline", rounds.roundDeadline(form));
+    result.put("reminderMode", DemandRounds.normalizeReminder(form.get("reminderMode")));
     result.put("requireMembers", flag(form.get("requireMembers")));
     result.put("subjects", subjects(key));
     List<Map<String, Object>> members = members(key, form);
@@ -57,25 +59,59 @@ public class DemandRequired {
     return result;
   }
 
-  /** 保存来源；整体替换，并为指定人员收集单自动补 can_fill。 */
+  /** 兼容旧必填接口：整体替换 ACL required 标志并双写旧表；只传 requireMembers 时仅更新批量规则。 */
   @Transactional
   public void save(String key, Map<String, Object> body, Long userId) {
     requireConfigure(key, userId);
     Map<String, Object> form =
         store.one("SELECT * FROM rm_demand_form WHERE form_key=? FOR UPDATE", key);
     if (form == null) throw new BaseException("收集单尚未配置");
-    Object raw = body.get("subjects");
     if (body.containsKey("subjects")) {
-      List<Map<String, String>> subjects = subjects(raw);
+      List<Map<String, String>> subjects = subjects(body.get("subjects"));
+      store.update("UPDATE rm_demand_acl SET required=FALSE WHERE form_key=?", key);
+      store.update("UPDATE rm_demand_acl_dept SET required=FALSE WHERE form_key=?", key);
       store.update("DELETE FROM rm_demand_required WHERE form_key=?", key);
-      for (Map<String, String> subject : subjects)
-        store.update(
-            "INSERT INTO rm_demand_required(form_key,subject_type,subject_id,created_by) VALUES(?,?,?,?)",
-            key,
-            subject.get("type"),
-            subject.get("id"),
-            userId);
-      grantFill(key, form, subjects, userId);
+      for (Map<String, String> subject : subjects) {
+        if (USER.equals(subject.get("type"))) {
+          Long memberId = number(subject.get("id"));
+          if (memberId == null) continue;
+          int updated =
+              store.update(
+                  "UPDATE rm_demand_acl SET required=TRUE, can_fill=TRUE WHERE form_key=? AND user_id=?",
+                  key,
+                  memberId);
+          if (updated == 0)
+            store.update(
+                "INSERT INTO rm_demand_acl(form_key,user_id,can_fill,can_handle,can_manage,required) VALUES(?,?,TRUE,FALSE,FALSE,TRUE)",
+                key,
+                memberId);
+          store.update(
+              "INSERT INTO rm_demand_required(form_key,subject_type,subject_id,created_by) VALUES(?,?,?,?)",
+              key,
+              USER,
+              String.valueOf(memberId),
+              userId);
+        } else {
+          String deptKey = subject.get("id");
+          int updated =
+              store.update(
+                  "UPDATE rm_demand_acl_dept SET required=TRUE, can_fill=TRUE WHERE form_key=? AND dept_key=?",
+                  key,
+                  deptKey);
+          if (updated == 0)
+            store.update(
+                "INSERT INTO rm_demand_acl_dept(form_key,dept_key,can_fill,can_handle,can_manage,created_by,required) VALUES(?,?,TRUE,FALSE,FALSE,?,TRUE)",
+                key,
+                deptKey,
+                userId);
+          store.update(
+              "INSERT INTO rm_demand_required(form_key,subject_type,subject_id,created_by) VALUES(?,?,?,?)",
+              key,
+              DEPT,
+              deptKey,
+              userId);
+        }
+      }
     }
     if (body.containsKey("requireMembers"))
       store.update(
@@ -108,27 +144,29 @@ public class DemandRequired {
     Set<Long> ids = new LinkedHashSet<>();
     for (Map<String, Object> row :
         store.rows(
-            "SELECT subject_id FROM rm_demand_required WHERE form_key=? AND subject_type='USER'",
+            "SELECT a.user_id FROM rm_demand_acl a JOIN ac_user u ON u.id=a.user_id AND u.deleted=FALSE WHERE a.form_key=? AND a.required=TRUE",
             key))
-      add(ids, row.get("subjectId"));
+      add(ids, row.get("userId"));
     for (Map<String, Object> row :
         store.rows(
-            "SELECT DISTINCT ud.user_id FROM rm_demand_required r "
-                + "JOIN rm_demand_dept gd ON gd.dept_key=r.subject_id AND gd.active=TRUE "
+            "SELECT DISTINCT ud.user_id FROM rm_demand_acl_dept ad "
+                + "JOIN rm_demand_dept gd ON gd.dept_key=ad.dept_key AND gd.active=TRUE "
                 + "JOIN rm_demand_dept pd ON pd.active=TRUE "
                 + "JOIN rm_demand_user_dept ud ON ud.dept_key=pd.dept_key "
-                + "WHERE r.form_key=? AND r.subject_type='DEPT' "
+                + "JOIN ac_user u ON u.id=ud.user_id AND u.deleted=FALSE "
+                + "WHERE ad.form_key=? AND ad.required=TRUE "
                 + "AND (pd.path=gd.path OR LOCATE(CONCAT(gd.path,'/'),pd.path)=1)",
             key))
       add(ids, row.get("userId"));
     if (form != null && flag(form.get("requireMembers")))
       for (Map<String, Object> row :
           store.rows(
-              "SELECT user_id FROM rm_demand_acl WHERE form_key=? AND can_fill=TRUE UNION "
+              "SELECT a.user_id FROM rm_demand_acl a JOIN ac_user u ON u.id=a.user_id AND u.deleted=FALSE WHERE a.form_key=? AND a.can_fill=TRUE UNION "
                   + "SELECT DISTINCT ud.user_id FROM rm_demand_acl_dept ad "
                   + "JOIN rm_demand_dept gd ON gd.dept_key=ad.dept_key AND gd.active=TRUE "
                   + "JOIN rm_demand_dept pd ON pd.active=TRUE "
                   + "JOIN rm_demand_user_dept ud ON ud.dept_key=pd.dept_key "
+                  + "JOIN ac_user u ON u.id=ud.user_id AND u.deleted=FALSE "
                   + "WHERE ad.form_key=? AND ad.can_fill=TRUE "
                   + "AND (pd.path=gd.path OR LOCATE(CONCAT(gd.path,'/'),pd.path)=1)",
               key,
@@ -151,19 +189,24 @@ public class DemandRequired {
     return ids;
   }
 
-  private boolean required(String key, Long userId, Map<String, Object> form) {    long count =
+  private boolean required(String key, Long userId, Map<String, Object> form) {
+    long direct =
         store.count(
-            "SELECT COUNT(*) FROM rm_demand_required r WHERE r.form_key=? AND ("
-                + "(r.subject_type='USER' AND r.subject_id=?) OR "
-                + "(r.subject_type='DEPT' AND EXISTS("
-                + "SELECT 1 FROM rm_demand_user_dept ud "
-                + "JOIN rm_demand_dept pd ON pd.dept_key=ud.dept_key AND pd.active=TRUE "
-                + "JOIN rm_demand_dept gd ON gd.dept_key=r.subject_id AND gd.active=TRUE "
-                + "WHERE ud.user_id=? AND (pd.path=gd.path OR LOCATE(CONCAT(gd.path,'/'),pd.path)=1))))",
+            "SELECT COUNT(*) FROM rm_demand_acl a JOIN ac_user u ON u.id=a.user_id AND u.deleted=FALSE WHERE a.form_key=? AND a.required=TRUE AND a.user_id=?",
             key,
-            String.valueOf(userId),
             userId);
-    if (count > 0) return true;
+    if (direct > 0) return true;
+    long department =
+        store.count(
+            "SELECT COUNT(*) FROM rm_demand_acl_dept ad "
+                + "JOIN rm_demand_dept gd ON gd.dept_key=ad.dept_key AND gd.active=TRUE "
+                + "JOIN rm_demand_dept pd ON pd.active=TRUE "
+                + "JOIN rm_demand_user_dept ud ON ud.dept_key=pd.dept_key "
+                + "WHERE ad.form_key=? AND ad.required=TRUE AND ud.user_id=? "
+                + "AND (pd.path=gd.path OR LOCATE(CONCAT(gd.path,'/'),pd.path)=1)",
+            key,
+            userId);
+    if (department > 0) return true;
     return flag(form.get("requireMembers")) && access.effectiveGrants(userId).canFill(key);
   }
 
@@ -180,18 +223,19 @@ public class DemandRequired {
   /** 展开后的必填人名单；来源取并集，停用账户不参与。 */
   private List<Map<String, Object>> members(String key, Map<String, Object> form) {
     Map<Long, Set<String>> byUser = new LinkedHashMap<>();
-    for (String id :
-        rowsOf(
-            "SELECT subject_id FROM rm_demand_required WHERE form_key=? AND subject_type='USER'",
-            key))
-      add(byUser, id, "USER");
     for (Map<String, Object> row :
         store.rows(
-            "SELECT DISTINCT ud.user_id FROM rm_demand_required r "
-                + "JOIN rm_demand_dept gd ON gd.dept_key=r.subject_id AND gd.active=TRUE "
+            "SELECT a.user_id FROM rm_demand_acl a JOIN ac_user u ON u.id=a.user_id AND u.deleted=FALSE WHERE a.form_key=? AND a.required=TRUE",
+            key))
+      add(byUser, row.get("userId"), "USER");
+    for (Map<String, Object> row :
+        store.rows(
+            "SELECT DISTINCT ud.user_id FROM rm_demand_acl_dept ad "
+                + "JOIN rm_demand_dept gd ON gd.dept_key=ad.dept_key AND gd.active=TRUE "
                 + "JOIN rm_demand_dept pd ON pd.active=TRUE "
                 + "JOIN rm_demand_user_dept ud ON ud.dept_key=pd.dept_key "
-                + "WHERE r.form_key=? AND r.subject_type='DEPT' "
+                + "JOIN ac_user u ON u.id=ud.user_id AND u.deleted=FALSE "
+                + "WHERE ad.form_key=? AND ad.required=TRUE "
                 + "AND (pd.path=gd.path OR LOCATE(CONCAT(gd.path,'/'),pd.path)=1)",
             key))
       add(byUser, row.get("userId"), "DEPT");
@@ -257,39 +301,6 @@ public class DemandRequired {
     return result;
   }
 
-  /** 指定人员收集单自动补填报权限；不回收已有授权。 */
-  private void grantFill(
-      String key, Map<String, Object> form, List<Map<String, String>> subjects, Long operator) {
-    if (!"SELECTED".equals(DemandRounds.str(form.get("visibility")))) return;
-    for (Map<String, String> subject : subjects) {
-      if (USER.equals(subject.get("type"))) {
-        Long userId = number(subject.get("id"));
-        if (userId == null) continue;
-        if (store.update(
-                "UPDATE rm_demand_acl SET can_fill=TRUE WHERE form_key=? AND user_id=?",
-                key,
-                userId)
-            == 0)
-          store.update(
-              "INSERT INTO rm_demand_acl(form_key,user_id,can_fill,can_handle,can_manage) VALUES(?,?,TRUE,FALSE,FALSE)",
-              key,
-              userId);
-      } else {
-        String deptKey = subject.get("id");
-        if (store.update(
-                "UPDATE rm_demand_acl_dept SET can_fill=TRUE WHERE form_key=? AND dept_key=?",
-                key,
-                deptKey)
-            == 0)
-          store.update(
-              "INSERT INTO rm_demand_acl_dept(form_key,dept_key,can_fill,can_handle,can_manage,created_by) VALUES(?,?,TRUE,FALSE,FALSE,?)",
-              key,
-              deptKey,
-              operator);
-      }
-    }
-  }
-
   private List<Map<String, String>> subjects(Object raw) {
     List<Map<String, String>> result = new ArrayList<>();
     if (raw instanceof Collection) {
@@ -328,10 +339,25 @@ public class DemandRequired {
 
   private List<Map<String, Object>> subjects(String key) {
     List<Map<String, Object>> result = new ArrayList<>();
+    List<Map<String, Object>> rows = new ArrayList<>();
     for (Map<String, Object> row :
         store.rows(
-            "SELECT subject_type,subject_id FROM rm_demand_required WHERE form_key=? ORDER BY subject_type,subject_id",
+            "SELECT user_id AS subject_id FROM rm_demand_acl WHERE form_key=? AND required=TRUE",
             key)) {
+      row.put("subjectType", USER);
+      rows.add(row);
+    }
+    for (Map<String, Object> row :
+        store.rows(
+            "SELECT dept_key AS subject_id FROM rm_demand_acl_dept WHERE form_key=? AND required=TRUE",
+            key)) {
+      row.put("subjectType", DEPT);
+      rows.add(row);
+    }
+    rows.sort(
+        Comparator.comparing((Map<String, Object> row) -> DemandRounds.str(row.get("subjectType")))
+            .thenComparing(row -> DemandRounds.str(row.get("subjectId"))));
+    for (Map<String, Object> row : rows) {
       String type = DemandRounds.str(row.get("subjectType"));
       String id = DemandRounds.str(row.get("subjectId"));
       Map<String, Object> subject = new LinkedHashMap<>();
@@ -379,10 +405,9 @@ public class DemandRequired {
     return builder.toString();
   }
 
-  /** 与收集配置一致：全局管理员、创建人或单据管理员。 */
+  /** 必填设置与成员权限一致：全局管理员或该收集单单据管理员。 */
   private void requireConfigure(String key, Long userId) {
-    if (!access.globalAdmin(userId) && !access.manage(key, userId) && !access.owner(key, userId))
-      throw new BaseException("仅该收集单的创建人或单据管理员可执行此操作", 403);
+    access.requireManage(key, userId);
   }
 
   private static Map<String, Object> body(Object... pairs) {

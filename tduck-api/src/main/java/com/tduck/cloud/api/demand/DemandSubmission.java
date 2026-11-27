@@ -2,8 +2,10 @@ package com.tduck.cloud.api.demand;
 
 import static com.tduck.cloud.api.demand.DemandStore.*;
 
+import cn.hutool.json.JSONUtil;
 import com.tduck.cloud.common.exception.BaseException;
 import com.tduck.cloud.form.entity.UserFormDataEntity;
+import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -61,6 +63,9 @@ public class DemandSubmission {
         }
       }
     if (title.length() > 200) title = title.substring(0, 200);
+    List<String> departments = formFields.snapshot(userId, anonymous);
+    String departmentJson = JSONUtil.toJsonStr(departments);
+    String submitterName = anonymous ? "匿名" : access.name(userId);
     store.update(
         "INSERT INTO rm_demand(id,data_id,form_key,request_no,title,submitter_id,submitter_name,anonymous,submitted_by,query_hash,department) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         demandId,
@@ -69,16 +74,20 @@ public class DemandSubmission {
         requestNo,
         title,
         anonymous ? null : userId,
-        anonymous ? "匿名" : access.name(userId),
+        submitterName,
         anonymous,
         backend ? userId : null,
         queryCode == null ? null : hash(queryCode),
-        formFields.snapshotJson(userId, anonymous));
+        departmentJson);
     Map<String, Object> notice = new LinkedHashMap<>();
     notice.put("id", demandId);
     notice.put("formKey", entity.getFormKey());
     notice.put("title", title);
     notice.put("submitterId", anonymous ? null : userId);
+    notice.put("submitterName", submitterName);
+    notice.put("department", departmentJson);
+    notice.put("createTime", new Timestamp(System.currentTimeMillis()));
+    notice.put("requestNo", requestNo);
     notice.put("anonymous", anonymous);
     boolean approvalPending = !anonymous && approval.start(notice) != null;
     if (!approvalPending) notices.newDemand(notice);

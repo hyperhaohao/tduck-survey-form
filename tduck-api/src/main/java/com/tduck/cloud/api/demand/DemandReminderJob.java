@@ -45,7 +45,7 @@ public class DemandReminderJob {
     for (Map<String, Object> row : forms) {
       Map<String, Object> form = rounds.advanceIfExpired(row);
       if (DemandRounds.NONE.equals(DemandRounds.str(form.get("roundMode")))) continue;
-      Timestamp end = DemandRounds.timestamp(form.get("roundEndTime"));
+      Timestamp end = rounds.roundDeadline(form);
       if (end == null) continue;
       LocalDate endDate = end.toInstant().atZone(rounds.zone()).toLocalDate();
       if (endDate.isBefore(today)) continue;
@@ -70,7 +70,9 @@ public class DemandReminderJob {
   }
 
   private boolean shouldRemind(String mode, LocalDate today, LocalDate endDate) {
-    if ("STRONG".equals(mode)) return true;
+    mode = DemandRounds.normalizeReminder(mode);
+    if (DemandRounds.REMINDER_NONE.equals(mode)) return false;
+    if (DemandRounds.REMINDER_STRONG.equals(mode)) return true;
     return endDate.minusDays(1).equals(today) || endDate.equals(today);
   }
 }

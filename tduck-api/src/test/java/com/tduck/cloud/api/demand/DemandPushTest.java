@@ -88,6 +88,32 @@ class DemandPushTest {
   }
 
   @Test
+  void requiredTodoDueFollowsRoundMode() {
+    Timestamp end = new Timestamp(System.currentTimeMillis() + 7200_000L);
+    Timestamp roundEnd = new Timestamp(System.currentTimeMillis() + 3600_000L);
+    jdbc.update(
+        "INSERT INTO rm_demand_form(form_key,summary,visibility,end_time,round_mode,round_no,round_start_time,round_end_time) "
+            + "VALUES('A','x','LOGIN',?,'SINGLE',1,CURRENT_TIMESTAMP,?)",
+        end,
+        roundEnd);
+    push.enqueue(event("n8", DemandNotices.REQUIRED, null, null, null));
+    Timestamp due =
+        jdbc.queryForObject(
+            "SELECT due_at FROM rm_demand_push WHERE channel='TODO' AND action='CREATE'",
+            Timestamp.class);
+    assertEquals(end.getTime() / 1000, due.getTime() / 1000);
+
+    jdbc.update("DELETE FROM rm_demand_push");
+    jdbc.update("UPDATE rm_demand_form SET round_mode='PERIODIC' WHERE form_key='A'");
+    push.enqueue(event("n9", DemandNotices.REQUIRED, null, null, null));
+    Timestamp periodicDue =
+        jdbc.queryForObject(
+            "SELECT due_at FROM rm_demand_push WHERE channel='TODO' AND action='CREATE'",
+            Timestamp.class);
+    assertEquals(roundEnd.getTime() / 1000, periodicDue.getTime() / 1000);
+  }
+
+  @Test
   void workNotificationSkipsWhenStationNoticeRead() {
     jdbc.update(
         "INSERT INTO rm_demand_notice(id,user_id,kind,title,content,read_at,create_time) VALUES('read-n',10,'APPROVAL','t','c',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)");
@@ -128,6 +154,101 @@ class DemandPushTest {
     assertEquals(1L, count("SELECT COUNT(*) FROM rm_demand_push WHERE channel='TODO' AND action='CREATE'"));
   }
 
+  @Test
+  void testSendReportsPartialWhenTodoFails() {
+    client.failTodo = true;
+    Map<String, Object> result = push.testSend(10L);
+    assertEquals("work-task", result.get("taskId"));
+    assertNull(result.get("todoTaskId"));
+    assertEquals("FAILED", result.get("todoStatus"));
+    assertTrue(String.valueOf(result.get("todoError")).contains("60011"));
+    assertEquals(1, client.workCalls);
+  }
+
+  @Test
+  void completionCancelsFailedTodoWithoutTaskAndCompletesSendingTodo() {
+    push.enqueue(event("n7", DemandNotices.APPROVAL, "d7", 1, null));
+    jdbc.update(
+        "UPDATE rm_demand_push SET status='FAILED',todo_task_id=NULL WHERE channel='TODO' AND action='CREATE' AND demand_id='d7'");
+    push.completeApprovalStep("d7", 1);
+    assertEquals(
+        1L,
+        count(
+            "SELECT COUNT(*) FROM rm_demand_push WHERE demand_id='d7' AND action='CREATE' AND status='CANCELLED'"));
+
+    push.enqueue(event("n8", DemandNotices.APPROVAL, "d8", 1, null));
+    jdbc.update(
+        "UPDATE rm_demand_push SET status='SENDING' WHERE channel='TODO' AND action='CREATE' AND demand_id='d8'");
+    push.completeApprovalStep("d8", 1);
+    assertEquals(
+        1L,
+        count(
+            "SELECT COUNT(*) FROM rm_demand_push WHERE demand_id='d8' AND action='COMPLETE' AND status='PENDING'"));
+  }
+
+  @Test
+  void dispatchReResolvesMappingAndSkipsAfterUnbind() {
+    push.enqueue(event("n9", DemandNotices.APPROVAL, "d9", 1, null));
+    jdbc.update(
+        "UPDATE rm_demand_dingtalk_user SET status='UNMATCHED',user_id=NULL,confirmed_at=NULL WHERE dingtalk_user_id='ding-10'");
+    push.dispatch();
+    assertEquals(0, client.workCalls);
+    assertEquals(0, client.todoCreates);
+    assertEquals(
+        2L,
+        count(
+            "SELECT COUNT(*) FROM rm_demand_push WHERE demand_id='d9' AND status='SKIPPED' AND last_error='NO_MAPPING'"));
+  }
+
+  @Test
+  void syncConflictDoesNotBindUserOrAbort() {
+    jdbc.update("DELETE FROM rm_demand_dingtalk_user");
+    jdbc.update(
+        "INSERT INTO rm_demand_dingtalk_user(dingtalk_user_id,union_id,user_id,name,email,active,status,confirmed_at) VALUES('ding-old','union-old',10,'旧账号','u10@example.com',TRUE,'CONFIRMED',CURRENT_TIMESTAMP)");
+    DemandDingTalkDirectory syncDirectory =
+        new DemandDingTalkDirectory(store, new SyncClient(props), props);
+    Map<String, Object> result = syncDirectory.sync();
+    assertEquals(1, ((Number) result.get("conflict")).intValue());
+    assertEquals(0, ((Number) result.get("pendingConfirm")).intValue());
+    assertEquals(
+        1L,
+        count(
+            "SELECT COUNT(*) FROM rm_demand_dingtalk_user WHERE dingtalk_user_id='ding-10' AND user_id IS NULL AND status='CONFLICT'"));
+    assertEquals(
+        1L,
+        count(
+            "SELECT COUNT(*) FROM rm_demand_dingtalk_user WHERE dingtalk_user_id='ding-old' AND user_id=10"));
+  }
+
+  @Test
+  void syncMatchesUniqueNameWhenEmailMissing() {
+    jdbc.update("DELETE FROM rm_demand_dingtalk_user");
+    DemandDingTalkDirectory syncDirectory =
+        new DemandDingTalkDirectory(store, new NameOnlySyncClient(props), props);
+    Map<String, Object> result = syncDirectory.sync();
+    assertEquals(1, ((Number) result.get("pendingConfirm")).intValue());
+    assertEquals(1, ((Number) result.get("matched")).intValue());
+    assertEquals(
+        1L,
+        count(
+            "SELECT COUNT(*) FROM rm_demand_dingtalk_user WHERE dingtalk_user_id='ding-10' AND user_id=10 AND status='PENDING_CONFIRM' AND match_source='NAME'"));
+  }
+
+  @Test
+  void syncDuplicateLocalNameCreatesConflict() {
+    jdbc.update("INSERT INTO ac_user(id,name,email) VALUES(11,'人员10',NULL)");
+    jdbc.update("DELETE FROM rm_demand_dingtalk_user");
+    DemandDingTalkDirectory syncDirectory =
+        new DemandDingTalkDirectory(store, new NameOnlySyncClient(props), props);
+    Map<String, Object> result = syncDirectory.sync();
+    assertEquals(1, ((Number) result.get("conflict")).intValue());
+    assertEquals(0, ((Number) result.get("pendingConfirm")).intValue());
+    assertEquals(
+        1L,
+        count(
+            "SELECT COUNT(*) FROM rm_demand_dingtalk_user WHERE dingtalk_user_id='ding-10' AND user_id IS NULL AND status='CONFLICT'"));
+  }
+
   private DemandNoticeCreatedEvent event(
       String noticeId, String kind, String demandId, Integer stepNo, Integer roundNo) {
     return new DemandNoticeCreatedEvent(
@@ -152,6 +273,7 @@ class DemandPushTest {
     int workCalls;
     int todoCreates;
     int todoCompletes;
+    boolean failTodo;
 
     FakeClient(DemandDingTalkProperties properties) {
       super(properties, new ObjectMapper());
@@ -173,6 +295,7 @@ class DemandPushTest {
         String detailUrl,
         String sourceId) {
       todoCreates++;
+      if (failTodo) throw new DemandDingTalkException(60011, "todo denied", false);
       return "todo-task-" + todoCreates;
     }
 
@@ -184,6 +307,51 @@ class DemandPushTest {
     @Override
     public void deleteTodo(String creatorUnionId, String taskId) {
       /* no-op */
+    }
+  }
+
+  static class SyncClient extends DemandDingTalkClient {
+    SyncClient(DemandDingTalkProperties properties) {
+      super(properties, new ObjectMapper());
+    }
+
+    @Override
+    public List<Map<String, Object>> listSubDepartments(long deptId) {
+      if (deptId != 1) return Collections.emptyList();
+      Map<String, Object> department = new LinkedHashMap<>();
+      department.put("dept_id", 2);
+      department.put("name", "测试部");
+      return Collections.singletonList(department);
+    }
+
+    @Override
+    public Map<String, Object> listUsers(long deptId, long cursor, int size) {
+      Map<String, Object> user = new LinkedHashMap<>();
+      user.put("userid", "ding-10");
+      user.put("unionid", "union-10");
+      user.put("email", "u10@example.com");
+      user.put("name", "人员10");
+      Map<String, Object> page = new LinkedHashMap<>();
+      page.put("has_more", false);
+      page.put("userlist", Collections.singletonList(user));
+      return page;
+    }
+  }
+
+  static class NameOnlySyncClient extends SyncClient {
+    NameOnlySyncClient(DemandDingTalkProperties properties) {
+      super(properties);
+    }
+
+    @Override
+    public Map<String, Object> listUsers(long deptId, long cursor, int size) {
+      Map<String, Object> page = super.listUsers(deptId, cursor, size);
+      Object users = page.get("userlist");
+      if (users instanceof List && !((List<?>) users).isEmpty()) {
+        Object first = ((List<?>) users).get(0);
+        if (first instanceof Map) ((Map<?, ?>) first).remove("email");
+      }
+      return page;
     }
   }
 }

@@ -201,7 +201,7 @@ public class DemandPush {
   public void completeApprovalStep(String demandId, int stepNo) {
     if (demandId == null) return;
     completeBy(
-        "SELECT * FROM rm_demand_push WHERE channel='TODO' AND action='CREATE' AND demand_id=? AND step_no=? AND status IN ('PENDING','SENT')",
+        "SELECT * FROM rm_demand_push WHERE channel='TODO' AND action='CREATE' AND demand_id=? AND step_no=? AND status IN ('PENDING','SENT','FAILED','SENDING')",
         new Object[] {demandId, stepNo});
   }
 
@@ -210,19 +210,21 @@ public class DemandPush {
   public void completeRequired(Long userId, String formKey, Integer roundNo) {
     if (userId == null || formKey == null || roundNo == null) return;
     completeBy(
-        "SELECT * FROM rm_demand_push WHERE channel='TODO' AND action='CREATE' AND kind=? AND user_id=? AND form_key=? AND round_no=? AND status IN ('PENDING','SENT')",
+        "SELECT * FROM rm_demand_push WHERE channel='TODO' AND action='CREATE' AND kind=? AND user_id=? AND form_key=? AND round_no=? AND status IN ('PENDING','SENT','FAILED','SENDING')",
         new Object[] {DemandNotices.REQUIRED, userId, formKey, roundNo});
   }
 
   private void completeBy(String sql, Object[] args) {
     for (Map<String, Object> parent : store.rows(sql, args)) {
       String status = str(parent.get("status"));
-      if (PENDING.equals(status)) {
+      if (PENDING.equals(status)
+          || (FAILED.equals(status) && str(parent.get("todoTaskId")).isEmpty())) {
         store.update(
-            "UPDATE rm_demand_push SET status=?,last_error='STEP_DONE_BEFORE_CREATE',update_time=CURRENT_TIMESTAMP WHERE id=? AND status=?",
+            "UPDATE rm_demand_push SET status=?,last_error='STEP_DONE_BEFORE_CREATE',update_time=CURRENT_TIMESTAMP WHERE id=? AND status IN (?,?)",
             CANCELLED,
             parent.get("id"),
-            PENDING);
+            PENDING,
+            FAILED);
         continue;
       }
       insertAction(parent, COMPLETE);
@@ -233,23 +235,26 @@ public class DemandPush {
   @Transactional
   public void cancelDemand(String demandId) {
     if (demandId == null) return;
-    cancelBy("SELECT * FROM rm_demand_push WHERE channel='TODO' AND action='CREATE' AND demand_id=? AND status IN ('PENDING','SENT')", new Object[] {demandId});
+    cancelBy("SELECT * FROM rm_demand_push WHERE channel='TODO' AND action='CREATE' AND demand_id=? AND status IN ('PENDING','SENT','FAILED','SENDING')", new Object[] {demandId});
   }
 
   @Transactional
   public void cancelForm(String formKey) {
     if (formKey == null) return;
-    cancelBy("SELECT * FROM rm_demand_push WHERE channel='TODO' AND action='CREATE' AND form_key=? AND status IN ('PENDING','SENT')", new Object[] {formKey});
+    cancelBy("SELECT * FROM rm_demand_push WHERE channel='TODO' AND action='CREATE' AND form_key=? AND status IN ('PENDING','SENT','FAILED','SENDING')", new Object[] {formKey});
   }
 
   private void cancelBy(String sql, Object[] args) {
     for (Map<String, Object> parent : store.rows(sql, args)) {
-      if (PENDING.equals(str(parent.get("status")))) {
+      String status = str(parent.get("status"));
+      if (PENDING.equals(status)
+          || (FAILED.equals(status) && str(parent.get("todoTaskId")).isEmpty())) {
         store.update(
-            "UPDATE rm_demand_push SET status=?,last_error='OBJECT_DELETED',update_time=CURRENT_TIMESTAMP WHERE id=? AND status=?",
+            "UPDATE rm_demand_push SET status=?,last_error='OBJECT_DELETED',update_time=CURRENT_TIMESTAMP WHERE id=? AND status IN (?,?)",
             CANCELLED,
             parent.get("id"),
-            PENDING);
+            PENDING,
+            FAILED);
       } else insertAction(parent, DELETE);
     }
   }
@@ -334,16 +339,29 @@ public class DemandPush {
       claimed.add(row);
     }
     if (claimed.isEmpty()) return 0;
+    List<Map<String, Object>> sendable = new ArrayList<>();
+    Map<String, String> currentMappings = new LinkedHashMap<>();
     List<String> userIds = new ArrayList<>();
     for (Map<String, Object> row : claimed) {
-      String dingUserId = str(row.get("dingtalkUserId"));
-      if (!dingUserId.isEmpty() && !userIds.contains(dingUserId)) userIds.add(dingUserId);
+      Long userId = number(row.get("userId"));
+      Map<String, Object> mapping = userId == null ? null : directory.confirmed(userId);
+      String dingUserId =
+          mapping == null ? "" : str(mapping.get("dingtalkUserId"));
+      if (dingUserId.isEmpty()) {
+        finish(row, SKIPPED, null, "NO_MAPPING");
+        continue;
+      }
+      sendable.add(row);
+      currentMappings.put(str(row.get("id")), dingUserId);
+      store.update(
+          "UPDATE rm_demand_push SET dingtalk_user_id=?,union_id=?,update_time=CURRENT_TIMESTAMP WHERE id=?",
+          dingUserId,
+          emptyToNull(str(mapping.get("unionId"))),
+          row.get("id"));
+      if (!userIds.contains(dingUserId)) userIds.add(dingUserId);
     }
-    if (userIds.isEmpty()) {
-      for (Map<String, Object> row : claimed) finish(row, SKIPPED, null, "NO_MAPPING");
-      return 0;
-    }
-    Map<String, Object> first = claimed.get(0);
+    if (sendable.isEmpty()) return 0;
+    Map<String, Object> first = sendable.get(0);
     String title = str(first.get("title"));
     String content = str(first.get("content"));
     String link = str(first.get("linkUrl"));
@@ -353,13 +371,13 @@ public class DemandPush {
       List<String> chunk = userIds.subList(start, Math.min(userIds.size(), start + 100));
       try {
         String taskId = client.sendWork(String.join(",", chunk), message);
-        for (Map<String, Object> row : claimed)
-          if (chunk.contains(str(row.get("dingtalkUserId"))))
+        for (Map<String, Object> row : sendable)
+          if (chunk.contains(currentMappings.get(str(row.get("id")))))
             finish(row, SENT, taskId, null);
         delivered += chunk.size();
       } catch (DemandDingTalkException error) {
-        for (Map<String, Object> row : claimed)
-          if (chunk.contains(str(row.get("dingtalkUserId")))) fail(row, error);
+        for (Map<String, Object> row : sendable)
+          if (chunk.contains(currentMappings.get(str(row.get("id"))))) fail(row, error);
       }
     }
     return delivered;
@@ -371,12 +389,23 @@ public class DemandPush {
     String action = str(row.get("action"));
     try {
       if (TODO.equals(channel) && CREATE.equals(action)) {
-        String creator = directory.creatorUnionId();
-        String unionId = str(row.get("unionId"));
-        if (creator == null || creator.isEmpty() || unionId.isEmpty()) {
-          finish(row, SKIPPED, null, "NO_CREATOR_OR_UNION");
+        Long userId = number(row.get("userId"));
+        Map<String, Object> mapping = userId == null ? null : directory.confirmed(userId);
+        String unionId = mapping == null ? "" : str(mapping.get("unionId"));
+        if (mapping == null || unionId.isEmpty()) {
+          finish(row, SKIPPED, null, mapping == null ? "NO_MAPPING" : "NO_UNION");
           return false;
         }
+        String creator = directory.creatorUnionId();
+        if (creator == null || creator.isEmpty()) {
+          finish(row, SKIPPED, null, "NO_CREATOR");
+          return false;
+        }
+        store.update(
+            "UPDATE rm_demand_push SET dingtalk_user_id=?,union_id=?,update_time=CURRENT_TIMESTAMP WHERE id=?",
+            str(mapping.get("dingtalkUserId")),
+            unionId,
+            row.get("id"));
         String taskId =
             client.createTodo(
                 creator,
@@ -401,6 +430,14 @@ public class DemandPush {
         }
         String taskId = str(parent.get("todoTaskId"));
         if (taskId.isEmpty()) {
+          String parentStatus = str(parent.get("status"));
+          if (FAILED.equals(parentStatus)
+              || DEAD.equals(parentStatus)
+              || CANCELLED.equals(parentStatus)
+              || SENT.equals(parentStatus)) {
+            finish(row, SKIPPED, null, "TODO_NOT_CREATED");
+            return false;
+          }
           retryLater(row, "TODO_NOT_CREATED_YET");
           return false;
         }
@@ -425,14 +462,21 @@ public class DemandPush {
           return false;
         }
         String taskId = str(parent.get("todoTaskId"));
-        if (!taskId.isEmpty()) {
-          String creator = directory.creatorUnionId();
-          if (creator == null || creator.isEmpty()) {
-            finish(row, SKIPPED, null, "NO_CREATOR");
+        if (taskId.isEmpty()) {
+          String parentStatus = str(parent.get("status"));
+          if (PENDING.equals(parentStatus) || SENDING.equals(parentStatus)) {
+            retryLater(row, "TODO_NOT_CREATED_YET");
             return false;
           }
-          client.deleteTodo(creator, taskId);
+          finish(row, SKIPPED, null, "TODO_NOT_CREATED");
+          return false;
         }
+        String creator = directory.creatorUnionId();
+        if (creator == null || creator.isEmpty()) {
+          finish(row, SKIPPED, null, "NO_CREATOR");
+          return false;
+        }
+        client.deleteTodo(creator, taskId);
         finish(row, SENT, null, null);
         store.update(
             "UPDATE rm_demand_push SET status=?,update_time=CURRENT_TIMESTAMP WHERE id=?",
@@ -545,7 +589,9 @@ public class DemandPush {
   }
 
   private Map<String, Object> workMessage(String title, String content, String link) {
-    String text = "### " + title + "\n\n" + clip(content, 500);
+    String body = clip(content, 500).replace("\r\n", "\n");
+    if (body.contains("\n")) body = "- " + body.replace("\n", "\n- ");
+    String text = "### " + title + "\n\n" + body;
     if (!link.isEmpty()) text += "\n\n[查看详情](" + link + ")";
     text = clipBytes(text, 1800);
     Map<String, Object> actionCard = new LinkedHashMap<>();
@@ -581,15 +627,19 @@ public class DemandPush {
   private Timestamp nextAttempt(String kind) {
     LocalDateTime now = LocalDateTime.now(settings.zone());
     LocalDateTime allowed = settings.nextAllowed(now, kind);
-    return Timestamp.valueOf(allowed);
+    return Timestamp.from(allowed.atZone(settings.zone()).toInstant());
   }
 
   private Timestamp formDue(String formKey) {
     Map<String, Object> form =
-        store.one("SELECT round_end_time,end_time FROM rm_demand_form WHERE form_key=?", formKey);
+        store.one(
+            "SELECT round_mode,round_end_time,end_time FROM rm_demand_form WHERE form_key=?",
+            formKey);
     if (form == null) return null;
-    Object value = form.get("roundEndTime");
-    if (value == null) value = form.get("endTime");
+    boolean periodic = DemandRounds.PERIODIC.equals(str(form.get("roundMode")));
+    // 周期轮次取本轮截止；不启用轮次（SINGLE）取整单截止，并兼容历史单轮只写 round_end_time 的数据。
+    Object value = periodic ? form.get("roundEndTime") : form.get("endTime");
+    if (value == null) value = periodic ? form.get("endTime") : form.get("roundEndTime");
     if (value instanceof Timestamp) return (Timestamp) value;
     if (value instanceof java.util.Date) return new Timestamp(((java.util.Date) value).getTime());
     if (value instanceof java.time.LocalDateTime)
@@ -695,7 +745,7 @@ public class DemandPush {
         "DELETE FROM rm_demand_push WHERE status IN ('SKIPPED','DEAD') AND update_time<DATE_SUB(CURRENT_TIMESTAMP,INTERVAL 90 DAY)");
   }
 
-  /** 测试发送：只发当前管理员本人，直接调用钉钉，不写 outbox。 */
+  /** 测试发送：只发当前管理员本人，直接调用钉钉，不写 outbox；待办失败返回部分成功。 */
   public Map<String, Object> testSend(Long userId) {
     if (!settings.enabled()) throw new BaseException("钉钉推送未启用或配置不完整", 409);
     Map<String, Object> mapping = directory.confirmed(userId);
@@ -706,21 +756,40 @@ public class DemandPush {
     String link = settings.linkBase();
     String taskId = client.sendWork(dingUserId, workMessage(title, "这是一条测试消息，请忽略。", link));
     String todoTaskId = null;
+    String todoStatus = "SKIPPED";
+    String todoError = null;
     String creator = directory.creatorUnionId();
-    if (properties.isTodoEnabled() && creator != null && !unionId.isEmpty()) {
-      todoTaskId =
-          client.createTodo(
-              creator,
-              unionId,
-              title,
-              "这是一条测试待办，请在钉钉待办中完成。",
-              System.currentTimeMillis() + 3600_000L,
-              link,
-              "TEST:" + UUID.randomUUID());
+    if (!properties.isTodoEnabled()) {
+      todoError = "TODO_DISABLED";
+    } else if (creator == null || creator.isEmpty()) {
+      todoError = "NO_CREATOR";
+    } else if (unionId.isEmpty()) {
+      todoError = "NO_UNION";
+    } else {
+      try {
+        todoTaskId =
+            client.createTodo(
+                creator,
+                unionId,
+                title,
+                "这是一条测试待办，请在钉钉待办中完成。",
+                System.currentTimeMillis() + 3600_000L,
+                link,
+                "TEST:" + UUID.randomUUID());
+        todoStatus = "SENT";
+      } catch (DemandDingTalkException error) {
+        todoStatus = "FAILED";
+        todoError = clip("code=" + error.getCode() + ":" + error.getMessage(), 480);
+      } catch (Exception error) {
+        todoStatus = "FAILED";
+        todoError = clip(error.getClass().getSimpleName() + ":" + error.getMessage(), 480);
+      }
     }
     Map<String, Object> result = new LinkedHashMap<>();
     result.put("taskId", taskId);
     result.put("todoTaskId", todoTaskId);
+    result.put("todoStatus", todoStatus);
+    result.put("todoError", todoError);
     return result;
   }
 

@@ -21,6 +21,8 @@ public class DemandDingTalkProperties {
   private String apiBase = "https://oapi.dingtalk.com";
   private String apiV1Base = "https://api.dingtalk.com";
   private String linkBase;
+  /** 管理员配置页写入的受限运行时文件；启动时覆盖上面的外部 secrets。 */
+  private String runtimeConfig = "/data/runtime/dingtalk.json";
   private long dispatchDelayMs = 30000;
   private int dispatchBatchSize = 50;
   private int maxAttempts = 5;

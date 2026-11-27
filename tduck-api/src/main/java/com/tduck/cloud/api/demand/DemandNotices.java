@@ -2,10 +2,14 @@ package com.tduck.cloud.api.demand;
 
 import static com.tduck.cloud.api.demand.DemandStore.*;
 
+import cn.hutool.json.JSONUtil;
 import com.tduck.cloud.common.exception.BaseException;
 import java.sql.Timestamp;
+import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -196,17 +200,19 @@ public class DemandNotices {
     }
   }
 
-  /** 新需求提交：通知该收集单的单据管理员，排除提交人本人。 */
+  /** 新需求提交：通知该收集单的单据管理员；提交人是唯一管理员时也通知本人。 */
   @Transactional
   public void newDemand(Map<String, Object> demand) {
     try {
       String formKey = str(demand.get("formKey"));
       if (formKey.isEmpty()) return;
       Long submitter = number(demand.get("submitterId"));
+      Set<Long> recipients = managers(formKey);
+      boolean soleManager = recipients.size() == 1 && recipients.contains(submitter);
+      if (!soleManager) recipients.remove(submitter);
       String title = "有新的需求待处理";
-      String content = clip(str(demand.get("title")), 1000);
-      for (Long userId : managers(formKey)) {
-        if (userId.equals(submitter)) continue;
+      String content = newDemandContent(demand, formKey);
+      for (Long userId : recipients) {
         if (store.count(
                 "SELECT COUNT(*) FROM rm_demand_notice WHERE user_id=? AND kind=? AND demand_id=?",
                 userId,
@@ -225,6 +231,88 @@ public class DemandNotices {
       }
     } catch (Exception error) {
       log.warn("新需求消息失败：{}", demand.get("id"), error);
+    }
+  }
+
+  /** 新需求正文：单据、填报人、部门、时间、单号与内容。 */
+  private String newDemandContent(Map<String, Object> demand, String formKey) {
+    boolean anonymous = flag(demand.get("anonymous"));
+    StringBuilder text = new StringBuilder("单据：").append(formName(formKey));
+    String submitter = anonymous ? "匿名" : str(demand.get("submitterName")).trim();
+    if (!anonymous && submitter.isEmpty()) {
+      Long userId = number(demand.get("submitterId"));
+      submitter = userId == null ? "用户" : access.name(userId);
+    }
+    text.append("\n填报人：").append(submitter.isEmpty() ? "用户" : submitter);
+    if (!anonymous) {
+      String departments = departmentText(demand.get("department"));
+      if (!departments.isEmpty()) text.append(" · 部门：").append(departments);
+    }
+    String submitted = submittedAt(demand);
+    if (!submitted.isEmpty()) text.append("\n时间：").append(submitted);
+    return clip(text.toString(), 1000);
+  }
+
+  private String formName(String formKey) {
+    try {
+      Map<String, Object> row =
+          store.one(
+              "SELECT name FROM fm_user_form WHERE form_key=? AND is_deleted=FALSE", formKey);
+      String name = row == null ? "" : str(row.get("name")).trim();
+      return name.isEmpty() ? formKey : name;
+    } catch (Exception error) {
+      return formKey;
+    }
+  }
+
+  private String departmentText(Object raw) {
+    if (raw == null) return "";
+    String text = str(raw).trim();
+    if (text.isEmpty() || "null".equalsIgnoreCase(text)) return "";
+    try {
+      List<String> parts = new ArrayList<>();
+      for (String value : JSONUtil.parseArray(text).toList(String.class)) {
+        String item = value == null ? "" : value.trim();
+        if (!item.isEmpty()) parts.add(item);
+      }
+      return String.join(" / ", parts);
+    } catch (Exception error) {
+      return text;
+    }
+  }
+
+  private String submittedAt(Map<String, Object> demand) {
+    Object demandId = demand.get("id");
+    if (demandId != null) {
+      try {
+        Map<String, Object> row =
+            store.one(
+                "SELECT CONCAT('', create_time) AS submitted_at FROM rm_demand WHERE id=?",
+                str(demandId));
+        if (row != null) {
+          String text = str(row.get("submittedAt")).trim();
+          if (text.length() >= 16) return text.substring(0, 16);
+          if (!text.isEmpty()) return text;
+        }
+      } catch (Exception error) {
+        log.debug("读取需求提交时间失败：{}", demandId, error);
+      }
+    }
+    return timeText(demand.get("createTime"));
+  }
+
+  private String timeText(Object value) {
+    if (value == null) return "";
+    try {
+      Instant instant;
+      if (value instanceof Timestamp) instant = ((Timestamp) value).toInstant();
+      else if (value instanceof java.util.Date) instant = ((java.util.Date) value).toInstant();
+      else if (value instanceof LocalDateTime)
+        instant = ((LocalDateTime) value).atZone(zone()).toInstant();
+      else return str(value);
+      return DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").format(instant.atZone(zone()));
+    } catch (Exception error) {
+      return str(value);
     }
   }
 

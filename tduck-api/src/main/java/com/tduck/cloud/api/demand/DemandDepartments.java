@@ -152,8 +152,12 @@ public class DemandDepartments {
         > 0) throw new BaseException("请先删除或移动下级部门");
     if (store.count("SELECT COUNT(*) FROM rm_demand_user_dept WHERE dept_key=?", deptKey) > 0)
       throw new BaseException("请先移除该部门的成员");
-    if (store.count("SELECT COUNT(*) FROM rm_demand_acl_dept WHERE dept_key=?", deptKey) > 0)
+    if (store.count("SELECT COUNT(*) FROM rm_demand_acl_dept WHERE dept_key=? AND (can_handle=TRUE OR can_manage=TRUE OR (can_fill=TRUE AND required=FALSE))", deptKey) > 0)
       throw new BaseException("该部门仍有收集单授权，请先移除授权");
+    if (store.count(
+            "SELECT COUNT(*) FROM rm_demand_acl_dept WHERE dept_key=? AND required=TRUE", deptKey)
+        > 0)
+      throw new BaseException("该部门仍被收集单标记为必填，请先在「成员与权限」取消必填或移除部门授权");
     store.update("DELETE FROM rm_demand_dept_leader WHERE dept_key=?", deptKey);
     store.update("DELETE FROM rm_demand_dept WHERE dept_key=?", deptKey);
     rebuildPaths();
@@ -371,7 +375,7 @@ public class DemandDepartments {
     access.requireManage(key, userId);
     List<Map<String, Object>> rows =
         store.rows(
-            "SELECT ad.dept_key,d.name,ad.can_fill,ad.can_handle,ad.can_manage,"
+            "SELECT ad.dept_key,d.name,ad.can_fill,ad.can_handle,ad.can_manage,ad.required,"
                 + "(SELECT COUNT(DISTINCT ud.user_id) FROM rm_demand_user_dept ud "
                 + "JOIN ac_user u ON u.id=ud.user_id AND u.deleted=FALSE "
                 + "JOIN rm_demand_dept pd ON pd.dept_key=ud.dept_key AND pd.active=TRUE "
@@ -387,14 +391,15 @@ public class DemandDepartments {
   @Transactional
   public void save(String key, String deptKey, Map<String, Object> body, Long userId) {
     access.requireManage(key, userId);
-    if (store.one("SELECT form_key FROM rm_demand_form WHERE form_key=? FOR UPDATE", key) == null)
-      throw new BaseException("请先保存需求收集配置");
+    Map<String, Object> form =
+        store.one("SELECT form_key,visibility FROM rm_demand_form WHERE form_key=? FOR UPDATE", key);
+    if (form == null) throw new BaseException("请先保存需求收集配置");
     if (store.count(
             "SELECT COUNT(*) FROM rm_demand_dept WHERE dept_key=? AND active=TRUE", deptKey)
         == 0) throw new BaseException("部门不存在或已停用");
     Map<String, Object> old =
         store.one(
-            "SELECT can_manage FROM rm_demand_acl_dept WHERE form_key=? AND dept_key=?",
+            "SELECT can_fill,can_handle,can_manage,required FROM rm_demand_acl_dept WHERE form_key=? AND dept_key=?",
             key,
             deptKey);
     boolean canManage =
@@ -406,15 +411,52 @@ public class DemandDepartments {
         && !canManage
         && !access.hasOtherManager(key, null, deptKey))
       throw new BaseException("每个收集单至少保留一名单据管理员");
+    boolean required =
+        body.containsKey("required")
+            ? flag(body.get("required"))
+            : old != null && flag(old.get("required"));
+    boolean canFill =
+        body.containsKey("canFill")
+            ? flag(body.get("canFill"))
+            : old != null && flag(old.get("canFill"));
+    boolean canHandle =
+        body.containsKey("canHandle")
+            ? flag(body.get("canHandle"))
+            : old != null && flag(old.get("canHandle"));
+    if (required) canFill = true;
     store.update("DELETE FROM rm_demand_acl_dept WHERE form_key=? AND dept_key=?", key, deptKey);
     store.update(
-        "INSERT INTO rm_demand_acl_dept(form_key,dept_key,can_fill,can_handle,can_manage,created_by) VALUES(?,?,?,?,?,?)",
+        "INSERT INTO rm_demand_acl_dept(form_key,dept_key,can_fill,can_handle,can_manage,created_by,required) VALUES(?,?,?,?,?,?,?)",
         key,
         deptKey,
-        flag(body.get("canFill")),
-        flag(body.get("canHandle")),
+        canFill,
+        canHandle,
         canManage,
-        userId);
+        userId,
+        required);
+    syncLegacyDeptRequired(key, deptKey, required, userId);
+  }
+
+  private void syncLegacyDeptRequired(
+      String key, String deptKey, boolean required, Long operator) {
+    if (required) {
+      if (store.count(
+              "SELECT COUNT(*) FROM rm_demand_required WHERE form_key=? AND subject_type='DEPT' AND subject_id=?",
+              key,
+              deptKey)
+          == 0)
+        store.update(
+            "INSERT INTO rm_demand_required(form_key,subject_type,subject_id,created_by) VALUES(?,?,?,?)",
+            key,
+            "DEPT",
+            deptKey,
+            operator);
+    } else {
+      store.update(
+          "DELETE FROM rm_demand_required WHERE form_key=? AND subject_type='DEPT' AND subject_id=?",
+          key,
+          deptKey);
+    }
   }
 
   /** 移除部门授权。 */
@@ -430,6 +472,10 @@ public class DemandDepartments {
     if (flag(old.get("canManage")) && !access.hasOtherManager(key, null, deptKey))
       throw new BaseException("每个收集单至少保留一名单据管理员");
     store.update("DELETE FROM rm_demand_acl_dept WHERE form_key=? AND dept_key=?", key, deptKey);
+    store.update(
+        "DELETE FROM rm_demand_required WHERE form_key=? AND subject_type='DEPT' AND subject_id=?",
+        key,
+        deptKey);
   }
 
   /** 全局管理员导入部门树与成员关系；replace=true 时停用未出现的部门并重建成员关系。 */

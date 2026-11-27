@@ -15,6 +15,7 @@ ruima:
       api-base: https://oapi.dingtalk.com
       api-v1-base: https://api.dingtalk.com
       link-base: ${DINGTALK_LINK_BASE:}
+      runtime-config: ${DINGTALK_RUNTIME_CONFIG:/data/runtime/dingtalk.json}
       dispatch-delay-ms: 30000
       dispatch-batch-size: 50
       max-attempts: 5

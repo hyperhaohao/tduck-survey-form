@@ -26,7 +26,7 @@ public class DemandForms {
     boolean global = access.globalAdmin(userId);
     StringBuilder sql =
         new StringBuilder(
-            "SELECT f.form_key,f.name,f.description,f.status,c.summary,c.visibility,c.collect_only,c.allow_anonymous,c.published,c.end_time,c.voided,c.revision,c.sort_no,c.round_mode,c.round_period,c.round_no,c.round_start_time,c.round_end_time,c.reminder_mode,c.require_members,c.requires_leader_approval,c.approval_mode,(SELECT COUNT(*) FROM rm_demand d WHERE d.form_key=f.form_key) AS demand_count FROM fm_user_form f "
+            "SELECT f.form_key,f.name,f.description,f.status,c.summary,c.visibility,c.collect_only,c.allow_anonymous,c.published,c.end_time,c.voided,c.revision,c.sort_no,c.round_mode,c.round_period,c.round_day,c.round_no,c.round_start_time,c.round_end_time,c.reminder_mode,c.require_members,c.requires_leader_approval,c.approval_mode,(SELECT COUNT(*) FROM rm_demand d WHERE d.form_key=f.form_key) AS demand_count FROM fm_user_form f "
                 + (management ? "LEFT" : "INNER")
                 + " JOIN rm_demand_form c ON c.form_key=f.form_key WHERE f.is_deleted=FALSE AND (f.is_folder=FALSE OR f.is_folder IS NULL)");
     List<Object> args = new ArrayList<>();
@@ -108,7 +108,9 @@ public class DemandForms {
       gate.put("approvalMode", approvalMode);
       gate.put("requiresLeaderApproval", !DemandApproval.NONE.equals(approvalMode));
       gate.put("roundMode", DemandRounds.str(form.get("roundMode")));
+      gate.put("roundDay", form.get("roundDay"));
       gate.put("roundEndTime", form.get("roundEndTime"));
+      gate.put("roundDeadline", rounds.roundDeadline(form));
       return gate;
     }
     if (deleted) {
@@ -122,6 +124,7 @@ public class DemandForms {
     if (!access.table(key, userId)) access.requireFill(key, userId, false);
     Map<String, Object> result = new LinkedHashMap<>(form);
     result.put("managed", true);
+    result.put("roundDeadline", rounds.roundDeadline(form));
     Map<String, Object> state = required.employeeState(key, userId, form);
     result.put("requiredOfMe", state.get("required"));
     result.put("requiredSubmitted", state.get("submitted"));
@@ -161,64 +164,106 @@ public class DemandForms {
     String summary = body.get("summary") == null ? "" : body.get("summary").toString();
     if (summary.length() > 2000) throw new BaseException("说明不能超过2000字");
     Object end = body.get("endTime");
-    java.sql.Timestamp endTime =
-        end == null || end.toString().isEmpty() ? null : java.sql.Timestamp.valueOf(end.toString());
+    java.sql.Timestamp endTime = null;
+    if (body.containsKey("endTime")) {
+      if (end != null && !end.toString().trim().isEmpty()) {
+        try {
+          endTime = java.sql.Timestamp.valueOf(end.toString().trim());
+        } catch (Exception error) {
+          throw new BaseException("整单截止时间格式无效");
+        }
+      }
+    } else if (old != null) {
+      endTime = DemandRounds.timestamp(old.get("endTime"));
+    }
+    if (endTime == null && old != null) {
+      String oldRoundMode =
+          DemandRounds.str(old.get("roundMode")).trim().toUpperCase(Locale.ROOT);
+      // 仅历史单轮把 round_end_time 当作整单截止；周期轮次的本轮截止不能升级为整单截止。
+      if (oldRoundMode.isEmpty()
+          || DemandRounds.NONE.equals(oldRoundMode)
+          || DemandRounds.SINGLE.equals(oldRoundMode))
+        endTime = DemandRounds.timestamp(old.get("roundEndTime"));
+    }
     boolean collectOnly =
         body.containsKey("collectOnly")
             ? flag(body.get("collectOnly"))
             : old != null && flag(old.get("collectOnly"));
-    String oldMode = old == null ? DemandRounds.NONE : DemandRounds.str(old.get("roundMode"));
-    if (oldMode.isEmpty()) oldMode = DemandRounds.NONE;
+    String oldModeRaw =
+        old == null ? DemandRounds.SINGLE : DemandRounds.str(old.get("roundMode"));
+    if (oldModeRaw.isEmpty() || DemandRounds.NONE.equals(oldModeRaw))
+      oldModeRaw = DemandRounds.SINGLE;
     String roundMode =
         body.containsKey("roundMode")
             ? DemandRounds.str(body.get("roundMode")).trim().toUpperCase(Locale.ROOT)
-            : oldMode;
-    if (!Arrays.asList(DemandRounds.NONE, DemandRounds.SINGLE, DemandRounds.PERIODIC)
-        .contains(roundMode)) throw new BaseException("轮次模式无效");
+            : oldModeRaw;
+    if (DemandRounds.NONE.equals(roundMode)) roundMode = DemandRounds.SINGLE;
+    if (!Arrays.asList(DemandRounds.SINGLE, DemandRounds.PERIODIC).contains(roundMode))
+      throw new BaseException("轮次模式无效");
     String roundPeriod =
         body.containsKey("roundPeriod")
             ? DemandRounds.str(body.get("roundPeriod")).trim().toUpperCase(Locale.ROOT)
             : old == null ? "" : DemandRounds.str(old.get("roundPeriod"));
     if (DemandRounds.PERIODIC.equals(roundMode)) {
-      if (!Arrays.asList(DemandRounds.MONTH, DemandRounds.QUARTER).contains(roundPeriod))
-        roundPeriod = DemandRounds.MONTH;
+      if (!Arrays.asList(
+              DemandRounds.DAILY, DemandRounds.WEEKLY, DemandRounds.MONTH, DemandRounds.QUARTER)
+          .contains(roundPeriod)) roundPeriod = DemandRounds.MONTH;
     } else roundPeriod = null;
+    Integer roundDay =
+        body.containsKey("roundDay")
+            ? DemandRounds.intValue(body.get("roundDay"))
+            : old == null ? null : DemandRounds.intValue(old.get("roundDay"));
+    if (DemandRounds.PERIODIC.equals(roundMode)) {
+      if (DemandRounds.DAILY.equals(roundPeriod)) roundDay = null;
+      else if (DemandRounds.WEEKLY.equals(roundPeriod)
+          && roundDay != null
+          && (roundDay < 1 || roundDay > 7))
+        throw new BaseException("每周锚点需为周一到周日");
+      else if (DemandRounds.MONTH.equals(roundPeriod)
+          && roundDay != null
+          && (roundDay == 0 || Math.abs(roundDay) > 31))
+        throw new BaseException("每月锚点需为 1-31 或 -1 到 -31");
+      else if (DemandRounds.QUARTER.equals(roundPeriod)
+          && roundDay != null
+          && (roundDay == 0 || Math.abs(roundDay) > 90))
+        throw new BaseException("每季度锚点需为 1-90 或 -1 到 -90");
+    } else roundDay = null;
     String reminderMode =
-        body.containsKey("reminderMode")
-            ? DemandRounds.str(body.get("reminderMode")).trim().toUpperCase(Locale.ROOT)
-            : old == null ? "DEFAULT" : DemandRounds.str(old.get("reminderMode"));
-    if (!Arrays.asList("DEFAULT", "STRONG").contains(reminderMode)) reminderMode = "DEFAULT";
+        DemandRounds.normalizeReminder(
+            body.containsKey("reminderMode")
+                ? body.get("reminderMode")
+                : old == null ? null : old.get("reminderMode"));
     boolean requireMembers =
         body.containsKey("requireMembers")
             ? flag(body.get("requireMembers"))
             : old != null && flag(old.get("requireMembers"));
-    Timestamp roundEnd =
-        body.containsKey("roundEndTime")
-            ? rounds.parse(body.get("roundEndTime"))
-            : old == null ? null : DemandRounds.timestamp(old.get("roundEndTime"));
-    if (body.containsKey("roundEndTime")
-        && body.get("roundEndTime") != null
-        && !body.get("roundEndTime").toString().trim().isEmpty()
-        && roundEnd == null) throw new BaseException("本轮截止期限格式无效");
     long roundNo = old == null ? 0 : number(old.get("roundNo"));
     Timestamp roundStart = old == null ? null : DemandRounds.timestamp(old.get("roundStartTime"));
-    if (DemandRounds.NONE.equals(roundMode)) {
-      roundNo = 0;
-      roundStart = null;
-      roundEnd = null;
-    } else {
-      if (roundNo <= 0 || !roundMode.equals(oldMode)) {
+    java.sql.Timestamp roundEnd = null;
+    boolean modeChanged = !roundMode.equals(oldModeRaw);
+    boolean periodChanged =
+        old == null
+            || !DemandRounds.str(old.get("roundPeriod")).equals(DemandRounds.str(roundPeriod));
+    boolean dayChanged =
+        old == null
+            || !java.util.Objects.equals(
+                DemandRounds.intValue(old.get("roundDay")), roundDay);
+    if (DemandRounds.SINGLE.equals(roundMode)) {
+      if (modeChanged || roundNo <= 0 || roundStart == null) {
         roundNo = 1;
         roundStart = rounds.now();
       }
-      if (roundEnd == null) {
-        if (DemandRounds.PERIODIC.equals(roundMode))
-          roundEnd = rounds.plusPeriod(roundStart, roundPeriod);
-        else throw new BaseException("请选择本轮截止期限");
+      roundEnd = null;
+    } else {
+      if (modeChanged || periodChanged || dayChanged || roundNo <= 0 || roundStart == null) {
+        roundNo = 1;
+        roundStart = rounds.now();
       }
-      if (roundEnd.getTime() <= rounds.now().getTime()
-          && body.containsKey("roundEndTime"))
-        throw new BaseException("本轮截止期限需晚于当前时间");
+      roundEnd =
+          old != null && !modeChanged && !periodChanged && !dayChanged
+              ? DemandRounds.timestamp(old.get("roundEndTime"))
+              : null;
+      if (roundEnd == null) roundEnd = rounds.plusPeriod(roundStart, roundPeriod, roundDay);
     }
     if (old == null) {
       Map<String, Object> next =
@@ -226,7 +271,7 @@ public class DemandForms {
       long sortNo =
           next == null || next.get("nextSort") == null ? 0 : number(next.get("nextSort"));
       store.update(
-          "INSERT INTO rm_demand_form(form_key,summary,visibility,allow_anonymous,published,end_time,sort_no,collect_only,round_mode,round_period,round_no,round_start_time,round_end_time,reminder_mode,require_members,requires_leader_approval,approval_mode) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          "INSERT INTO rm_demand_form(form_key,summary,visibility,allow_anonymous,published,end_time,sort_no,collect_only,round_mode,round_period,round_day,round_no,round_start_time,round_end_time,reminder_mode,require_members,requires_leader_approval,approval_mode) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
           key,
           summary,
           visibility,
@@ -237,6 +282,7 @@ public class DemandForms {
           collectOnly,
           roundMode,
           roundPeriod,
+          roundDay,
           roundNo,
           roundStart,
           roundEnd,
@@ -249,7 +295,7 @@ public class DemandForms {
       long revision = Long.parseLong(String.valueOf(body.getOrDefault("revision", -1)));
       if (revision != number(old.get("revision"))) throw new BaseException("配置已变化，请刷新后重试", 409);
       store.update(
-          "UPDATE rm_demand_form SET summary=?,visibility=?,allow_anonymous=?,published=?,end_time=?,collect_only=?,round_mode=?,round_period=?,round_no=?,round_start_time=?,round_end_time=?,reminder_mode=?,require_members=?,requires_leader_approval=?,approval_mode=?,revision=revision+1 WHERE form_key=?",
+          "UPDATE rm_demand_form SET summary=?,visibility=?,allow_anonymous=?,published=?,end_time=?,collect_only=?,round_mode=?,round_period=?,round_day=?,round_no=?,round_start_time=?,round_end_time=?,reminder_mode=?,require_members=?,requires_leader_approval=?,approval_mode=?,revision=revision+1 WHERE form_key=?",
           summary,
           visibility,
           anonymous,
@@ -258,6 +304,7 @@ public class DemandForms {
           collectOnly,
           roundMode,
           roundPeriod,
+          roundDay,
           roundNo,
           roundStart,
           roundEnd,
@@ -268,6 +315,10 @@ public class DemandForms {
           key);
       if (!access.hasOtherManager(key, null, null)) grantCreatorManager(key);
     }
+    // 必填成员必须可填报；保存配置时补齐历史 ACL 行的 can_fill。
+    store.update("UPDATE rm_demand_acl SET can_fill=TRUE WHERE form_key=? AND required=TRUE", key);
+    store.update(
+        "UPDATE rm_demand_acl_dept SET can_fill=TRUE WHERE form_key=? AND required=TRUE", key);
   }
   /** 手工开启下一轮；单轮与周期均可用。 */
   @Transactional
@@ -288,9 +339,11 @@ public class DemandForms {
     if (source == null) return;
     row.put("roundMode", source.get("roundMode"));
     row.put("roundPeriod", source.get("roundPeriod"));
+    row.put("roundDay", source.get("roundDay"));
     row.put("roundNo", source.get("roundNo"));
     row.put("roundStartTime", source.get("roundStartTime"));
     row.put("roundEndTime", source.get("roundEndTime"));
+    row.put("roundDeadline", rounds.roundDeadline(source));
     row.put("reminderMode", source.get("reminderMode"));
     row.put("requireMembers", source.get("requireMembers"));
   }
@@ -470,7 +523,7 @@ public class DemandForms {
     access.requireManage(key, userId);
     List<Map<String, Object>> rows =
         store.rows(
-            "SELECT a.user_id,u.name,a.can_fill,a.can_handle,a.can_manage FROM rm_demand_acl a JOIN ac_user u ON u.id=a.user_id WHERE a.form_key=? ORDER BY u.name,a.user_id",
+            "SELECT a.user_id,u.name,a.can_fill,a.can_handle,a.can_manage,a.required FROM rm_demand_acl a JOIN ac_user u ON u.id=a.user_id WHERE a.form_key=? ORDER BY u.name,a.user_id",
             key);
     normalizeMemberFlags(rows);
     return rows;
@@ -481,6 +534,7 @@ public class DemandForms {
       row.put("canFill", flag(row.get("canFill")));
       row.put("canHandle", flag(row.get("canHandle")));
       row.put("canManage", flag(row.get("canManage")));
+      row.put("required", flag(row.get("required")));
     }
   }
   /** 单据管理员读取可分派的经办人，不暴露完整成员名单。 */
@@ -503,13 +557,16 @@ public class DemandForms {
   @Transactional
   public void member(String key, Long memberId, Map<String, Object> body, Long userId) {
     access.requireManage(key, userId);
-    if (store.one("SELECT form_key FROM rm_demand_form WHERE form_key=? FOR UPDATE", key) == null)
-      throw new BaseException("请先保存需求收集配置");
+    Map<String, Object> form =
+        store.one("SELECT form_key,visibility FROM rm_demand_form WHERE form_key=? FOR UPDATE", key);
+    if (form == null) throw new BaseException("请先保存需求收集配置");
     if (store.count("SELECT COUNT(*) FROM ac_user WHERE id=? AND deleted=FALSE", memberId) == 0)
       throw new BaseException("用户不存在或已停用");
     Map<String, Object> old =
         store.one(
-            "SELECT can_manage FROM rm_demand_acl WHERE form_key=? AND user_id=?", key, memberId);
+            "SELECT can_fill,can_handle,can_manage,required FROM rm_demand_acl WHERE form_key=? AND user_id=?",
+            key,
+            memberId);
     boolean canManage =
         body.containsKey("canManage")
             ? flag(body.get("canManage"))
@@ -519,14 +576,53 @@ public class DemandForms {
         && !canManage
         && !access.hasOtherManager(key, memberId, null))
       throw new BaseException("每个收集单至少保留一名单据管理员");
+    boolean required =
+        body.containsKey("required")
+            ? flag(body.get("required"))
+            : old != null && flag(old.get("required"));
+    boolean canFill =
+        body.containsKey("canFill")
+            ? flag(body.get("canFill"))
+            : old != null && flag(old.get("canFill"));
+    boolean canHandle =
+        body.containsKey("canHandle")
+            ? flag(body.get("canHandle"))
+            : old != null && flag(old.get("canHandle"));
+    if (required) canFill = true;
     store.update("DELETE FROM rm_demand_acl WHERE form_key=? AND user_id=?", key, memberId);
     store.update(
-        "INSERT INTO rm_demand_acl(form_key,user_id,can_fill,can_handle,can_manage) VALUES(?,?,?,?,?)",
+        "INSERT INTO rm_demand_acl(form_key,user_id,can_fill,can_handle,can_manage,required) VALUES(?,?,?,?,?,?)",
         key,
         memberId,
-        flag(body.get("canFill")),
-        flag(body.get("canHandle")),
-        canManage);
+        canFill,
+        canHandle,
+        canManage,
+        required);
+    syncLegacyUserRequired(key, memberId, required, userId);
+  }
+
+  /** 过渡期双写旧必填表，保证旧后端/旧前端回滚后名单仍可用。 */
+  private void syncLegacyUserRequired(
+      String key, Long memberId, boolean required, Long operator) {
+    String subjectId = String.valueOf(memberId);
+    if (required) {
+      if (store.count(
+              "SELECT COUNT(*) FROM rm_demand_required WHERE form_key=? AND subject_type='USER' AND subject_id=?",
+              key,
+              subjectId)
+          == 0)
+        store.update(
+            "INSERT INTO rm_demand_required(form_key,subject_type,subject_id,created_by) VALUES(?,?,?,?)",
+            key,
+            "USER",
+            subjectId,
+            operator);
+    } else {
+      store.update(
+          "DELETE FROM rm_demand_required WHERE form_key=? AND subject_type='USER' AND subject_id=?",
+          key,
+          subjectId);
+    }
   }
   /** 移除成员授权；最后一名单据管理员不可移除。 */
   @Transactional
@@ -541,6 +637,10 @@ public class DemandForms {
     if (flag(old.get("canManage")) && !access.hasOtherManager(key, memberId, null))
       throw new BaseException("每个收集单至少保留一名有效单据管理员");
     store.update("DELETE FROM rm_demand_acl WHERE form_key=? AND user_id=?", key, memberId);
+    store.update(
+        "DELETE FROM rm_demand_required WHERE form_key=? AND subject_type='USER' AND subject_id=?",
+        key,
+        String.valueOf(memberId));
   }
   /** 管理页面仅返回必要的账户标识和姓名。 */
   public List<Map<String, Object>> users(String keyword, Long userId) {

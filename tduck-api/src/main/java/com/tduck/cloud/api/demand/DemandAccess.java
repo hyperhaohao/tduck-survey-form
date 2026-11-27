@@ -6,6 +6,7 @@ import com.tduck.cloud.account.entity.UserEntity;
 import com.tduck.cloud.account.service.UserService;
 import com.tduck.cloud.common.exception.BaseException;
 import com.tduck.cloud.common.util.SecurityUtils;
+import java.sql.Timestamp;
 import java.util.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -137,11 +138,12 @@ public class DemandAccess {
   public boolean hasOtherManager(String key, Long excludeUserId, String excludeDeptKey) {
     StringBuilder users =
         new StringBuilder(
-            "SELECT COUNT(*) FROM rm_demand_acl WHERE form_key=? AND can_manage=TRUE");
+            "SELECT COUNT(*) FROM rm_demand_acl a JOIN ac_user u ON u.id=a.user_id AND u.deleted=FALSE "
+                + "WHERE a.form_key=? AND a.can_manage=TRUE");
     List<Object> userArgs = new ArrayList<>();
     userArgs.add(key);
     if (excludeUserId != null) {
-      users.append(" AND user_id<>?");
+      users.append(" AND a.user_id<>?");
       userArgs.add(excludeUserId);
     }
     if (store.count(users.toString(), userArgs.toArray()) > 0) return true;
@@ -197,8 +199,11 @@ public class DemandAccess {
     if (form.get("endTime") instanceof java.util.Date
         && ((java.util.Date) form.get("endTime")).getTime() < System.currentTimeMillis())
       throw new BaseException("该收集单已截止");
-    if (form.get("roundEndTime") instanceof java.util.Date
-        && ((java.util.Date) form.get("roundEndTime")).getTime() < System.currentTimeMillis())
+    Timestamp roundDeadline = rounds.roundDeadline(form);
+    if (roundDeadline != null
+        && roundDeadline.getTime() < System.currentTimeMillis()
+        && !(form.get("endTime") instanceof java.util.Date
+            && ((java.util.Date) form.get("endTime")).getTime() == roundDeadline.getTime()))
       throw new BaseException("本轮收集已截止");
     if (anonymous) {
       if (approvalRequired(form))

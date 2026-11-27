@@ -113,6 +113,20 @@ public class DemandDingTalkDirectory {
                     "SELECT COUNT(*) FROM rm_demand_dingtalk_user WHERE user_id=? AND dingtalk_user_id<>?",
                     localUserId,
                     dingUserId);
+            if (used > 0) {
+              // 离职/停用的旧映射不应永久占用本地账户的唯一槽位。
+              store.update(
+                  "UPDATE rm_demand_dingtalk_user SET user_id=NULL,match_source=NULL "
+                      + "WHERE user_id=? AND dingtalk_user_id<>? AND (status=? OR active=FALSE)",
+                  localUserId,
+                  dingUserId,
+                  INVALID);
+              used =
+                  store.count(
+                      "SELECT COUNT(*) FROM rm_demand_dingtalk_user WHERE user_id=? AND dingtalk_user_id<>?",
+                      localUserId,
+                      dingUserId);
+            }
             if (used > 0) status = CONFLICT;
             else {
               status = PENDING_CONFIRM;
@@ -121,6 +135,46 @@ public class DemandDingTalkDirectory {
             }
           }
         } else if (candidates.size() > 1) status = CONFLICT;
+      }
+      // 邮箱缺失或未命中时，按姓名唯一匹配；重名双方都标记冲突，交给管理员手工处理。
+      if (UNMATCHED.equals(status) && !name.trim().isEmpty()) {
+        List<Map<String, Object>> candidates =
+            store.rows(
+                "SELECT id FROM ac_user WHERE deleted=FALSE AND TRIM(name)=?", name.trim());
+        if (candidates.size() == 1) {
+          Long candidate = number(candidates.get(0).get("id"));
+          if (candidate != null) {
+            long used =
+                store.count(
+                    "SELECT COUNT(*) FROM rm_demand_dingtalk_user WHERE user_id=? AND dingtalk_user_id<>?",
+                    candidate,
+                    dingUserId);
+            if (used > 0) {
+              store.update(
+                  "UPDATE rm_demand_dingtalk_user SET user_id=NULL,match_source=NULL "
+                      + "WHERE user_id=? AND dingtalk_user_id<>? AND (status=? OR active=FALSE)",
+                  candidate,
+                  dingUserId,
+                  INVALID);
+              used =
+                  store.count(
+                      "SELECT COUNT(*) FROM rm_demand_dingtalk_user WHERE user_id=? AND dingtalk_user_id<>?",
+                      candidate,
+                      dingUserId);
+            }
+            if (used > 0) status = CONFLICT;
+            else {
+              localUserId = candidate;
+              matchSource = "NAME";
+              status = PENDING_CONFIRM;
+              pending++;
+            }
+          }
+        } else if (candidates.size() > 1) status = CONFLICT;
+      }
+      if (CONFLICT.equals(status)) {
+        localUserId = null;
+        matchSource = null;
       }
       if (PENDING_CONFIRM.equals(status)) matched++;
       else if (CONFLICT.equals(status)) conflict++;
@@ -204,6 +258,12 @@ public class DemandDingTalkDirectory {
       if (mapping != null) return str(mapping.get("unionId"));
     }
     return null;
+  }
+
+  public Map<String, Object> mapping(String dingtalkUserId) {
+    return store.one(
+        "SELECT dingtalk_user_id,union_id,user_id,name,status,active FROM rm_demand_dingtalk_user WHERE dingtalk_user_id=?",
+        dingtalkUserId);
   }
 
   @Transactional
@@ -295,6 +355,14 @@ public class DemandDingTalkDirectory {
                 + " ORDER BY d.status,d.name LIMIT ? OFFSET ?",
             pageArgs.toArray());
     for (Map<String, Object> row : rows) {
+      String creatorUnion = creatorUnionId();
+      boolean creator =
+          creatorUnion != null && !creatorUnion.isEmpty()
+              ? creatorUnion.equals(str(row.get("unionId")))
+              : properties.getCreatorUserId() > 0
+                  && number(row.get("userId")) != null
+                  && properties.getCreatorUserId() == number(row.get("userId"));
+      row.put("creator", creator);
       row.put("mobileMasked", mask(str(row.get("mobile"))));
       row.put("emailMasked", maskEmail(str(row.get("email"))));
       row.remove("mobile");

@@ -141,16 +141,21 @@ class DemandWorkflowTest {
   }
 
   private String create(long dataId, Long userId, boolean anonymous) {
+    return create("A", dataId, userId, anonymous);
+  }
+
+  private String create(String formKey, long dataId, Long userId, boolean anonymous) {
     UserFormDataEntity e = new UserFormDataEntity();
-    e.setFormKey("A");
+    e.setFormKey(formKey);
     e.setOriginalData(Collections.singletonMap("title", "改进建议" + dataId));
     e.setDemandAnonymous(anonymous);
     e.setCreateBy("伪造身份");
     submission.before(e, userId, false);
     e.setId(dataId);
     jdbc.update(
-        "INSERT INTO fm_user_form_data(id,form_key,original_data) VALUES(?,'A',?)",
+        "INSERT INTO fm_user_form_data(id,form_key,original_data) VALUES(?,?,?)",
         dataId,
+        formKey,
         "{\"title\":\"改进建议\",\"attachment\":[{\"url\":\"http://storage.test/u/A/file.pdf\",\"name\":\"附件\"}]}");
     Map<String, Object> r = new LinkedHashMap<>();
     submission.after(e, r, userId, false);
@@ -283,6 +288,15 @@ class DemandWorkflowTest {
     assertFalse(access.visible(access.form("A"), 60L));
     assertTrue(access.effectiveGrants(40L).canFill("A"));
     assertFalse(access.effectiveGrants(60L).canFill("A"));
+  }
+
+  @Test
+  void requiredDepartmentAlwaysFillable() {
+    departments.save("A", "D1", body("required", true), 1L);
+    assertEquals(
+        1L,
+        store.count(
+            "SELECT COUNT(*) FROM rm_demand_acl_dept WHERE form_key='A' AND dept_key='D1' AND required=TRUE AND can_fill=TRUE"));
   }
 
   @Test
@@ -2312,6 +2326,8 @@ class DemandWorkflowTest {
             period,
             "roundEndTime",
             end,
+            "endTime",
+            end,
             "reminderMode",
             reminderMode,
             "requireMembers",
@@ -2331,6 +2347,24 @@ class DemandWorkflowTest {
         "SELECT COUNT(*) FROM rm_demand_notice WHERE user_id=? AND kind=?", userId, kind);
   }
 
+  private String noticeContent(long userId, String demandId) {
+    Map<String, Object> row =
+        store.one(
+            "SELECT content FROM rm_demand_notice WHERE user_id=? AND kind=? AND demand_id=?",
+            userId,
+            DemandNotices.NEW_DEMAND,
+            demandId);
+    return row == null ? "" : String.valueOf(row.get("content"));
+  }
+
+  private String demandTime(String demandId) {
+    Map<String, Object> row =
+        store.one(
+            "SELECT CONCAT('', create_time) AS submitted_at FROM rm_demand WHERE id=?", demandId);
+    String text = row == null ? "" : String.valueOf(row.get("submittedAt"));
+    return text.length() >= 16 ? text.substring(0, 16) : text;
+  }
+
   @Test
   void requiredSourcesUnionUsersDepartmentsAndMembers() {
     jdbc.update("INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(10,'D1'),(20,'D2')");
@@ -2343,6 +2377,14 @@ class DemandWorkflowTest {
     for (Map<String, Object> member : members) byId.put(number(member.get("userId")), member);
     assertTrue(((List<?>) byId.get(10L).get("sources")).contains("DEPT"));
     assertTrue(((List<?>) byId.get(20L).get("sources")).containsAll(Arrays.asList("USER", "DEPT")));
+    assertEquals(
+        1L,
+        store.count(
+            "SELECT COUNT(*) FROM rm_demand_acl WHERE form_key='A' AND user_id=20 AND required=TRUE AND can_fill=TRUE"));
+    assertEquals(
+        1L,
+        store.count(
+            "SELECT COUNT(*) FROM rm_demand_acl_dept WHERE form_key='A' AND dept_key='D1' AND required=TRUE AND can_fill=TRUE"));
 
     create(9001, 20L, false);
     create(9002, 10L, true);
@@ -2381,11 +2423,12 @@ class DemandWorkflowTest {
   void singleRoundDeadlineStopsSubmission() {
     configureRound("SINGLE", null, in(3600000), false, "DEFAULT");
     jdbc.update(
-        "UPDATE rm_demand_form SET round_start_time=?,round_end_time=? WHERE form_key='A'",
+        "UPDATE rm_demand_form SET round_start_time=?,round_end_time=?,end_time=? WHERE form_key='A'",
         new Timestamp(System.currentTimeMillis() - 7200000L),
+        new Timestamp(System.currentTimeMillis() - 1000L),
         new Timestamp(System.currentTimeMillis() - 1000L));
     BaseException error = assertThrows(BaseException.class, () -> create(9020, 20L, false));
-    assertTrue(error.getMessage().contains("本轮收集已截止"));
+    assertTrue(error.getMessage().contains("该收集单已截止"));
     assertThrows(BaseException.class, () -> create(9021, 10L, true));
   }
 
@@ -2457,6 +2500,8 @@ class DemandWorkflowTest {
             "SINGLE",
             "roundEndTime",
             end,
+            "endTime",
+            end,
             "reminderMode",
             "STRONG",
             "requireMembers",
@@ -2465,6 +2510,229 @@ class DemandWorkflowTest {
     jdbc.update("DELETE FROM rm_demand_notice");
     assertEquals(1, reminders.remind(today.minusDays(3)));
     assertEquals(1, reminders.remind(today.minusDays(3)));
+  }
+
+  @Test
+  void singleRoundUsesWholeEndAndReminderNoneSkips() {
+    Timestamp end = in(3600000);
+    configureRound("SINGLE", null, end, false, "NONE");
+    Map<String, Object> form =
+        store.one(
+            "SELECT round_mode,round_end_time,round_start_time,end_time FROM rm_demand_form WHERE form_key='A'");
+    assertEquals("SINGLE", form.get("roundMode"));
+    assertNull(form.get("roundEndTime"));
+    assertNotNull(form.get("roundStartTime"));
+    assertEquals(end.toInstant(), rounds.roundDeadline(form).toInstant());
+
+    jdbc.update("INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(10,'D1')");
+    saveRequired("USER", 10);
+    assertEquals(0, reminders.remind(LocalDate.now()));
+    assertEquals("NONE", required.settings("A", 1L).get("reminderMode"));
+  }
+
+  @Test
+  void historicalSingleRoundEndStillActsAsDeadlineAndSurvivesSave() {
+    configureRound("SINGLE", null, in(3600000), false, "DEFAULT");
+    Timestamp legacy = in(1800000);
+    jdbc.update(
+        "UPDATE rm_demand_form SET end_time=NULL,round_end_time=? WHERE form_key='A'", legacy);
+    Map<String, Object> form =
+        store.one(
+            "SELECT round_mode,round_end_time,end_time FROM rm_demand_form WHERE form_key='A'");
+    assertEquals(legacy.toInstant(), rounds.roundDeadline(form).toInstant());
+
+    Map<String, Object> current = store.one("SELECT revision FROM rm_demand_form WHERE form_key='A'");
+    forms.configure(
+        "A",
+        body(
+            "visibility",
+            "LOGIN",
+            "allowAnonymous",
+            true,
+            "published",
+            true,
+            "collectOnly",
+            false,
+            "revision",
+            number(current.get("revision")),
+            "roundMode",
+            "SINGLE",
+            "reminderMode",
+            "DEFAULT"),
+        1L);
+    Map<String, Object> saved =
+        store.one("SELECT round_end_time,end_time FROM rm_demand_form WHERE form_key='A'");
+    assertNull(saved.get("roundEndTime"));
+    assertEquals(legacy.toInstant(), ((Timestamp) saved.get("endTime")).toInstant());
+  }
+
+  @Test
+  void selectedVisibilityBackfillsRequiredCanFill() {
+    configureRound("SINGLE", null, in(3600000), false, "DEFAULT");
+    forms.member("A", 10L, body("canFill", false, "required", true), 1L);
+    jdbc.update("UPDATE rm_demand_acl SET can_fill=FALSE WHERE form_key='A' AND user_id=10");
+    Map<String, Object> current = store.one("SELECT revision FROM rm_demand_form WHERE form_key='A'");
+    forms.configure(
+        "A",
+        body(
+            "visibility",
+            "SELECTED",
+            "allowAnonymous",
+            false,
+            "published",
+            true,
+            "collectOnly",
+            false,
+            "revision",
+            number(current.get("revision")),
+            "roundMode",
+            "SINGLE",
+            "reminderMode",
+            "DEFAULT"),
+        1L);
+    assertEquals(
+        1L,
+        store.count(
+            "SELECT COUNT(*) FROM rm_demand_acl WHERE form_key='A' AND user_id=10 AND required=TRUE AND can_fill=TRUE"));
+  }
+
+  @Test
+  void legacyPeriodicWithoutAnchorKeepsRunningRound() {
+    configureRound("PERIODIC", "MONTH", in(3600000), false, "DEFAULT");
+    Timestamp roundStart = in(1000);
+    Timestamp roundEnd = in(7200000);
+    jdbc.update(
+        "UPDATE rm_demand_form SET round_day=NULL,round_no=3,round_start_time=?,round_end_time=? WHERE form_key='A'",
+        roundStart,
+        roundEnd);
+    Map<String, Object> current = store.one("SELECT revision FROM rm_demand_form WHERE form_key='A'");
+    forms.configure(
+        "A",
+        body(
+            "visibility",
+            "LOGIN",
+            "allowAnonymous",
+            true,
+            "published",
+            true,
+            "collectOnly",
+            false,
+            "revision",
+            number(current.get("revision")),
+            "roundMode",
+            "PERIODIC",
+            "roundPeriod",
+            "MONTH",
+            "roundDay",
+            null,
+            "reminderMode",
+            "DEFAULT"),
+        1L);
+    Map<String, Object> saved =
+        store.one(
+            "SELECT round_no,round_start_time,round_end_time,round_day FROM rm_demand_form WHERE form_key='A'");
+    assertEquals(3L, number(saved.get("roundNo")));
+    assertEquals(roundEnd.getTime() / 1000, ((Timestamp) saved.get("roundEndTime")).getTime() / 1000);
+    assertNull(saved.get("roundDay"));
+  }
+
+  @Test
+  void periodicSaveWithoutEndTimeDoesNotPromoteRoundDeadline() {
+    configureRound("PERIODIC", "MONTH", in(3600000), false, "DEFAULT");
+    jdbc.update("UPDATE rm_demand_form SET end_time=NULL WHERE form_key='A'");
+    Map<String, Object> current = store.one("SELECT revision FROM rm_demand_form WHERE form_key='A'");
+    forms.configure(
+        "A",
+        body(
+            "visibility",
+            "LOGIN",
+            "allowAnonymous",
+            true,
+            "published",
+            true,
+            "collectOnly",
+            false,
+            "revision",
+            number(current.get("revision")),
+            "roundMode",
+            "PERIODIC",
+            "roundPeriod",
+            "MONTH",
+            "reminderMode",
+            "DEFAULT"),
+        1L);
+    Map<String, Object> saved =
+        store.one("SELECT end_time FROM rm_demand_form WHERE form_key='A'");
+    assertNull(saved.get("endTime"));
+  }
+
+  @Test
+  void periodicAnchorsSupportDailyWeeklyMonthlyQuarterAndNegativeDay() {
+    Timestamp start =
+        Timestamp.from(
+            java.time.LocalDateTime.of(2026, 12, 10, 10, 0).atZone(rounds.zone()).toInstant());
+    assertEquals(
+        java.time.LocalDateTime.of(2026, 12, 11, 10, 0),
+        rounds.plusPeriod(start, "DAILY", null).toInstant().atZone(rounds.zone()).toLocalDateTime());
+    assertEquals(
+        java.time.LocalDateTime.of(2026, 12, 11, 10, 0),
+        rounds.plusPeriod(start, "WEEKLY", 5).toInstant().atZone(rounds.zone()).toLocalDateTime());
+    assertEquals(
+        java.time.LocalDateTime.of(2026, 12, 31, 10, 0),
+        rounds.plusPeriod(start, "MONTH", -1).toInstant().atZone(rounds.zone()).toLocalDateTime());
+    assertEquals(
+        java.time.LocalDateTime.of(2026, 12, 31, 10, 0),
+        rounds
+            .plusPeriod(start, "QUARTER", -1)
+            .toInstant()
+            .atZone(rounds.zone())
+            .toLocalDateTime());
+  }
+
+  @Test
+  void memberRequiredPersistsToAclAndLegacyTable() {
+    configureRound("SINGLE", null, in(3600000), false, "DEFAULT");
+    forms.member("A", 10L, body("canFill", false, "required", true), 1L);
+    List<Map<String, Object>> members = forms.members("A", 1L);
+    assertTrue(flag(members.get(0).get("required")));
+    assertTrue(flag(members.get(0).get("canFill")));
+    assertEquals(
+        1L,
+        store.count(
+            "SELECT COUNT(*) FROM rm_demand_required WHERE form_key='A' AND subject_type='USER' AND subject_id='10'"));
+    Map<String, Object> settings = required.settings("A", 1L);
+    assertTrue(settings.get("subjects").toString().contains("USER"));
+    assertTrue(flag(required.employeeState("A", 10L).get("required")));
+    forms.member("A", 10L, body("required", false), 1L);
+    assertEquals(
+        0L,
+        store.count(
+            "SELECT COUNT(*) FROM rm_demand_required WHERE form_key='A' AND subject_type='USER' AND subject_id='10'"));
+  }
+
+  @Test
+  void memberPartialUpdateKeepsUnspecifiedGrants() {
+    configureRound("SINGLE", null, in(3600000), false, "DEFAULT");
+    forms.member("A", 10L, body("canFill", true, "canHandle", true, "canManage", true), 1L);
+    forms.member("A", 10L, body("required", true), 1L);
+    Map<String, Object> row =
+        store.one(
+            "SELECT can_fill,can_handle,can_manage,required FROM rm_demand_acl WHERE form_key='A' AND user_id=10");
+    assertTrue(flag(row.get("canFill")));
+    assertTrue(flag(row.get("canHandle")));
+    assertTrue(flag(row.get("canManage")));
+    assertTrue(flag(row.get("required")));
+  }
+
+  @Test
+  void deletedManagerDoesNotCountAsOtherManager() {
+    jdbc.update(
+        "INSERT INTO rm_demand_form(form_key,visibility,allow_anonymous,published) VALUES('B','LOGIN',TRUE,TRUE)");
+    jdbc.update(
+        "INSERT INTO rm_demand_acl(form_key,user_id,can_fill,can_handle,can_manage) VALUES('B',1,FALSE,FALSE,TRUE),('B',10,FALSE,FALSE,TRUE)");
+    assertTrue(access.hasOtherManager("B", 1L, null));
+    jdbc.update("UPDATE ac_user SET deleted=TRUE WHERE id=10");
+    assertFalse(access.hasOtherManager("B", 1L, null));
   }
 
   @Test
@@ -2541,6 +2809,66 @@ class DemandWorkflowTest {
   }
 
   @Test
+  void newDemandContentIncludesFormSubmitterDepartmentTimeAndRequestNo() {
+    jdbc.update("INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(10,'D1')");
+    String id = create(9063, 10L, false);
+    String content = noticeContent(50L, id);
+    assertTrue(content.contains("单据：需求征集"));
+    assertTrue(content.contains("填报人：人员10"));
+    assertTrue(content.contains("部门：总部 / 技术部"));
+    assertTrue(content.matches("(?s).*时间：\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}.*"));
+    assertTrue(content.contains("时间：" + demandTime(id)));
+    assertTrue(content.split("\n").length >= 3);
+    assertFalse(content.contains("单号："));
+    assertFalse(content.contains("内容："));
+  }
+
+  @Test
+  void anonymousNewDemandContentHidesIdentityAndDepartment() {
+    jdbc.update("INSERT INTO rm_demand_user_dept(user_id,dept_key) VALUES(10,'D1')");
+    String id = create(9064, null, true);
+    String content = noticeContent(50L, id);
+    assertTrue(content.contains("填报人：匿名"));
+    assertFalse(content.contains("人员"));
+    assertFalse(content.contains("部门："));
+  }
+
+  @Test
+  void soleManagerSubmitterReceivesOwnNewDemandNotice() {
+    jdbc.update(
+        "INSERT INTO fm_user_form(form_key,name,description,status,user_id) VALUES('B','自管表单','测试',2,10)");
+    jdbc.update(
+        "INSERT INTO rm_demand_form(form_key,visibility,allow_anonymous,published) VALUES('B','LOGIN',TRUE,TRUE)");
+    jdbc.update(
+        "INSERT INTO rm_demand_acl(form_key,user_id,can_fill,can_handle,can_manage) VALUES('B',10,TRUE,FALSE,TRUE)");
+    String id = create("B", 9061, 10L, false);
+    assertEquals(1L, countNotice(10L, DemandNotices.NEW_DEMAND));
+    assertEquals(
+        1L,
+        number(
+            store
+                .one(
+                    "SELECT COUNT(*) AS total FROM rm_demand_notice WHERE user_id=10 AND kind=? AND demand_id=?",
+                    DemandNotices.NEW_DEMAND,
+                    id)
+                .get("total")));
+  }
+
+  @Test
+  void submitterManagerStillExcludedWhenAnotherManagerExists() {
+    jdbc.update(
+        "INSERT INTO fm_user_form(form_key,name,description,status,user_id) VALUES('C','协同表单','测试',2,10)");
+    jdbc.update(
+        "INSERT INTO rm_demand_form(form_key,visibility,allow_anonymous,published) VALUES('C','LOGIN',TRUE,TRUE)");
+    jdbc.update(
+        "INSERT INTO rm_demand_acl(form_key,user_id,can_fill,can_handle,can_manage) VALUES"
+            + "('C',10,TRUE,FALSE,TRUE),('C',50,FALSE,FALSE,TRUE)");
+    create("C", 9062, 10L, false);
+    assertEquals(0L, countNotice(10L, DemandNotices.NEW_DEMAND));
+    assertEquals(1L, countNotice(50L, DemandNotices.NEW_DEMAND));
+  }
+
+  @Test
   void deletingDemandClearsNotices() {
     String id = create(9070, 10L, false);
     assignTo(id, 30);
@@ -2573,9 +2901,14 @@ class DemandWorkflowTest {
     saveRequired("USER", 10);
     create(9080, 10L, false);
     assertEquals(1L, number(((Map<String, Object>) required.settings("A", 1L).get("stats")).get("submitted")));
-    forms.nextRound("A", body("roundEndTime", in(7200000)), 1L);
-    Map<String, Object> form = store.one("SELECT round_no FROM rm_demand_form WHERE form_key='A'");
+    Timestamp nextEnd = in(7200000);
+    forms.nextRound("A", body("roundEndTime", nextEnd), 1L);
+    Map<String, Object> form =
+        store.one(
+            "SELECT round_no,round_end_time,end_time FROM rm_demand_form WHERE form_key='A'");
     assertEquals(2L, number(form.get("roundNo")));
+    assertNull(form.get("roundEndTime"));
+    assertEquals(nextEnd.getTime() / 1000, ((Timestamp) form.get("endTime")).getTime() / 1000);
     assertEquals(0L, number(((Map<String, Object>) required.settings("A", 1L).get("stats")).get("submitted")));
   }
 
@@ -2667,6 +3000,10 @@ class DemandWorkflowTest {
         store.one("SELECT approval_status FROM rm_demand WHERE id=?", id).get("approvalStatus"));
     assertEquals(1L, countNotice(10L, DemandNotices.APPROVAL_RESULT));
     assertEquals(1L, countNotice(50L, DemandNotices.NEW_DEMAND));
+    String approvedContent = noticeContent(50L, id);
+    assertTrue(approvedContent.contains("单据：需求征集"));
+    assertTrue(approvedContent.contains("填报人：人员10"));
+    assertTrue(approvedContent.contains("时间：" + demandTime(id)));
     assertEquals(0L, number(access.capabilities(20L).get("approvalPending")));
     assertEquals(0, listScope(20L, "approval").size());
     assertEquals(1, listScope(50L, "pending").size());
